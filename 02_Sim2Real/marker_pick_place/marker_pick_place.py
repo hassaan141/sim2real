@@ -22,6 +22,7 @@ parser.add_argument("--debug-control-interval", type=int, default=30)
 parser.add_argument("--repo-id", type=str, default="local/banana_pick")
 parser.add_argument("--repo-root", type=str, default="datasets/banana_pick_lerobot")
 parser.add_argument("--task-name", type=str, default="pick up the banana and place it in the cup")
+parser.add_argument("--domain-randomization", action="store_true", default=False)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -42,10 +43,15 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 import marker_pick_place.tasks  # noqa: F401
 from marker_pick_place.tasks.marker_env_cfg import (
+    randomize_banana_on_table_dr,
+    randomize_scene_visuals,
     refresh_config_cameras,
     sync_env_camera_to_world,
     sync_gripper_camera_to_frame,
 )
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import SceneEntityCfg
+from marker_pick_place.mdp import randomize_robot_color
 
 
 JOINT_NAMES = [
@@ -57,7 +63,6 @@ JOINT_NAMES = [
     "gripper",
 ]
 CAMERA_SENSOR_NAMES = ["env_cam", "gripper_cam"]
-REPLICATOR_DR_EVENT = "marker_pick_place_visual_domain_randomization"
 
 
 class TeleopHotkeys:
@@ -84,71 +89,6 @@ class TeleopHotkeys:
         elif event.input == carb.input.KeyboardInput.T:
             self.reset_env = True
         return True
-
-
-class ReplicatorDomainRandomizer:
-    """Visual domain randomization driven by an explicit Replicator event."""
-
-    def __init__(self, seed: int) -> None:
-        self.seed = seed
-        self.rep = None
-        self.enabled = False
-
-    def setup(self) -> None:
-        try:
-            import omni.replicator.core as rep
-        except Exception as exc:
-            print(f"[WARN]: Replicator unavailable; visual domain randomization disabled: {exc}")
-            return
-
-        self.rep = rep
-        try:
-            if hasattr(rep, "set_global_seed"):
-                rep.set_global_seed(self.seed)
-
-            def randomize_materials(path_pattern, color_min, color_max):
-                prims = rep.get.prims(path_pattern=path_pattern)
-                mats = rep.create.material_omnipbr(
-                    diffuse=rep.distribution.uniform(color_min, color_max),
-                    roughness=rep.distribution.uniform(0.35, 0.95),
-                    metallic=rep.distribution.choice([0.0, 0.0, 0.05]),
-                    count=32,
-                )
-                with prims:
-                    rep.randomizer.materials(mats)
-                return prims.node
-
-            rep.randomizer.register(randomize_materials, override=True)
-            with rep.trigger.on_custom_event(event_name=REPLICATOR_DR_EVENT):
-                rep.randomizer.randomize_materials(
-                    r"/World/envs/env_.*/(Cup.*|Table.*|Floor|.*Wall.*|.*Baseboard.*|EnvCamMount)",
-                    (0.15, 0.15, 0.15),
-                    (0.95, 0.95, 0.95),
-                )
-                rep.create.light(
-                    light_type="Sphere",
-                    count=2,
-                    position=rep.distribution.uniform((-0.7, -1.0, 0.8), (0.8, 0.8, 1.8)),
-                    color=rep.distribution.uniform((0.75, 0.75, 0.70), (1.0, 1.0, 1.0)),
-                    intensity=rep.distribution.uniform(200.0, 1200.0),
-                    scale=rep.distribution.uniform(0.15, 0.45),
-                )
-        except Exception as exc:
-            print(f"[WARN]: Replicator setup failed; visual domain randomization disabled: {exc}")
-            self.rep = None
-            return
-
-        self.enabled = True
-        print("[INFO]: Replicator visual domain randomization enabled")
-
-    def randomize(self) -> None:
-        if not self.enabled or self.rep is None:
-            return
-        try:
-            self.rep.utils.send_og_event(event_name=REPLICATOR_DR_EVENT)
-            self.rep.orchestrator.step(rt_subframes=2)
-        except Exception as exc:
-            print(f"[WARN]: Replicator randomization failed: {exc}")
 
 
 def _print_robot_actuator_config(env) -> None:
@@ -265,6 +205,37 @@ def _disable_camera_pipeline(env_cfg) -> None:
     env_cfg.observations.visual.rgb_gripper = None
 
 
+def _enable_domain_randomization(env_cfg) -> None:
+    env_cfg.events.reset_robot_position.params["position_range"] = (-0.04, 0.04)
+    env_cfg.events.randomize_banana_pose = None
+    env_cfg.events.randomize_banana_pose_dr = EventTerm(
+        func=randomize_banana_on_table_dr,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("banana"),
+        },
+    )
+    env_cfg.events.randomize_robot_appearance = None
+    env_cfg.events.randomize_robot_appearance_dr = EventTerm(
+        func=randomize_robot_color,
+        mode="reset",
+        params={
+            "color_names": ["orange", "teal", "black"],
+        },
+    )
+    env_cfg.events.randomize_scene_visuals_dr = EventTerm(
+        func=randomize_scene_visuals,
+        mode="reset",
+    )
+
+
+def _disable_domain_randomization(env_cfg) -> None:
+    env_cfg.events.reset_robot_position.params["position_range"] = (0.0, 0.0)
+    env_cfg.events.randomize_banana_pose_dr = None
+    env_cfg.events.randomize_robot_appearance_dr = None
+    env_cfg.events.randomize_scene_visuals_dr = None
+
+
 def _warmup_render(steps: int = 12) -> None:
     sim = sim_utils.SimulationContext.instance()
     if sim is None:
@@ -336,6 +307,10 @@ def _make_env():
     env_cfg.seed = args_cli.seed
     if not args_cli.enable_cameras:
         _disable_camera_pipeline(env_cfg)
+    if args_cli.domain_randomization:
+        _enable_domain_randomization(env_cfg)
+    else:
+        _disable_domain_randomization(env_cfg)
 
     env = gym.make(TASK_NAME, cfg=env_cfg)
     _print_robot_actuator_config(env)
@@ -391,6 +366,7 @@ def _run_teleop(env, joint_indices: torch.Tensor) -> None:
     print("[INFO]:   Y - stop and save recording")
     print("[INFO]:   T - reset env and randomize domain with Isaac Lab events")
     print("[INFO]:   Close Isaac Sim - exit teleop")
+    print(f"[INFO]: Domain randomization: {'enabled' if args_cli.domain_randomization else 'disabled'}")
     if args_cli.record:
         print("[INFO]: Recording armed. Press R to start.")
     step_count = 0
@@ -417,7 +393,10 @@ def _run_teleop(env, joint_indices: torch.Tensor) -> None:
                     if args_cli.enable_cameras:
                         _force_camera_refresh(env)
                     actions.zero_()
-                    print("[INFO]: Environment reset")
+                    print(
+                        "[INFO]: Environment reset"
+                        f" ({'domain randomization enabled' if args_cli.domain_randomization else 'clean mode'})"
+                    )
 
                 sample = leader.read_sample()
                 actions[0] = sample.target_rad

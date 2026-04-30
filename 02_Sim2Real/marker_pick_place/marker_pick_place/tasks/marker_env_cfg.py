@@ -88,9 +88,53 @@ GRIPPER_CAMERA_POS = (0.02660, -0.00600, -0.12000)
 # Quaternion convention: w, x, y, z.
 GRIPPER_CAMERA_ROT = (-0.15123, 0.40528, -0.90154, -0.01034)
 
-ENV_CAMERA_POS = (0.33404, -0.66566, 0.98601)
-ENV_CAMERA_ROT_DEG = (45.659, 24.07, 20.477)
+ENV_CAMERA_POS = (0.75, -0.75, 1.25)
+ENV_CAMERA_ROT_DEG = (52.9746765, 0.0, 45.0)
 ENV_CAMERA_ROT = tuple(euler_angles_to_quat(np.array(ENV_CAMERA_ROT_DEG), degrees=True))
+
+VISUAL_RANDOMIZATION_GROUPS = {
+    "table": [
+        "table_top",
+        "table_leg_front_left",
+        "table_leg_front_right",
+        "table_leg_back_left",
+        "table_leg_back_right",
+    ],
+    "floor": ["floor"],
+    "walls": [
+        "back_wall",
+        "right_wall",
+        "right_wall_face",
+        "right_wall_up",
+        "left_jog_wall_42_5",
+        "left_jog_wall_21",
+        "left_long_wall_100",
+        "back_baseboard",
+        "right_baseboard",
+        "right_face_baseboard",
+        "right_up_baseboard",
+        "left_jog_baseboard_42_5",
+        "left_jog_baseboard_21",
+        "left_long_baseboard_100",
+    ],
+    "cup": [
+        "cup_bottom",
+        "cup_front_wall",
+        "cup_back_wall",
+        "cup_left_wall",
+        "cup_right_wall",
+        "cup_handle_top",
+        "cup_handle_bottom",
+        "cup_handle_outer",
+    ],
+}
+
+VISUAL_RANDOMIZATION_COLOR_RANGES = {
+    "table": ((0.01, 0.01, 0.01), (0.25, 0.25, 0.25)),
+    "floor": ((0.35, 0.35, 0.32), (0.75, 0.75, 0.72)),
+    "walls": ((0.65, 0.65, 0.62), (0.98, 0.98, 0.94)),
+    "cup": ((0.02, 0.12, 0.35), (0.15, 0.45, 1.0)),
+}
 
 
 def _xform_attr(prim, attr_name, add_op):
@@ -184,7 +228,7 @@ def randomize_banana_on_table(
     env_ids,
     asset_cfg=SceneEntityCfg("banana"),
 ):
-    """Place the banana on the tabletop while keeping it out of the cup."""
+    """Place the banana on the left side of the tabletop for clean data collection."""
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
 
@@ -192,15 +236,36 @@ def randomize_banana_on_table(
     root_states = banana.data.default_root_state[env_ids].clone()
     positions = root_states[:, 0:3] + env.scene.env_origins[env_ids]
 
-    x = torch.empty(len(env_ids), device=banana.device).uniform_(0.06, 0.17)
-    y_abs = torch.empty(len(env_ids), device=banana.device).uniform_(0.08, 0.20)
-    y_sign = torch.where(
-        torch.rand(len(env_ids), device=banana.device) < 0.5,
-        -torch.ones(len(env_ids), device=banana.device),
-        torch.ones(len(env_ids), device=banana.device),
-    )
-    positions[:, 0] = x
-    positions[:, 1] = y_abs * y_sign
+    positions[:, 0] = 0.13
+    positions[:, 1] = -0.20
+    positions[:, 2] = 0.485
+
+    yaw = torch.zeros(len(env_ids), device=banana.device)
+    roll = torch.zeros_like(yaw)
+    pitch = torch.zeros_like(yaw)
+    orientations_delta = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+    orientations = math_utils.quat_mul(root_states[:, 3:7], orientations_delta)
+
+    banana.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    zero_velocity = torch.zeros((len(env_ids), 6), device=banana.device)
+    banana.write_root_velocity_to_sim(zero_velocity, env_ids=env_ids)
+
+
+def randomize_banana_on_table_dr(
+    env,
+    env_ids,
+    asset_cfg=SceneEntityCfg("banana"),
+):
+    """Randomize banana pose on the left side of the tabletop while avoiding the cup."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+
+    banana = env.scene[asset_cfg.name]
+    root_states = banana.data.default_root_state[env_ids].clone()
+    positions = root_states[:, 0:3] + env.scene.env_origins[env_ids]
+
+    positions[:, 0] = torch.empty(len(env_ids), device=banana.device).uniform_(0.05, 0.18)
+    positions[:, 1] = torch.empty(len(env_ids), device=banana.device).uniform_(-0.24, -0.10)
     positions[:, 2] = 0.485
 
     yaw = torch.empty(len(env_ids), device=banana.device).uniform_(-0.8, 0.8)
@@ -212,6 +277,46 @@ def randomize_banana_on_table(
     banana.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
     zero_velocity = torch.zeros((len(env_ids), 6), device=banana.device)
     banana.write_root_velocity_to_sim(zero_velocity, env_ids=env_ids)
+
+
+def _sample_color(color_range):
+    low, high = color_range
+    return tuple(
+        torch.empty(1, device="cpu").uniform_(low[i], high[i]).item()
+        for i in range(3)
+    )
+
+
+def _set_asset_color(env, asset_name, color):
+    asset = env.scene[asset_name]
+    prim_path = asset.prim_paths[0]
+    material_path = f"{prim_path}/Looks/visualMaterial/Shader"
+    prims = sim_utils.find_matching_prims(material_path)
+    if not prims:
+        return
+    attr = prims[0].GetAttribute("inputs:diffuse_color_constant")
+    if attr.IsValid():
+        attr.Set(color)
+
+
+def randomize_scene_visuals(env, env_ids):
+    """Randomize simple USD material colors and dome light appearance."""
+    with Sdf.ChangeBlock():
+        for group_name, asset_names in VISUAL_RANDOMIZATION_GROUPS.items():
+            color = _sample_color(VISUAL_RANDOMIZATION_COLOR_RANGES[group_name])
+            for asset_name in asset_names:
+                _set_asset_color(env, asset_name, color)
+
+        light_prim = get_current_stage().GetPrimAtPath("/World/Light")
+        if light_prim.IsValid():
+            intensity = torch.empty(1, device="cpu").uniform_(1800.0, 4200.0).item()
+            color = _sample_color(((0.75, 0.75, 0.70), (1.0, 1.0, 1.0)))
+            intensity_attr = light_prim.GetAttribute("inputs:intensity")
+            color_attr = light_prim.GetAttribute("inputs:color")
+            if intensity_attr.IsValid():
+                intensity_attr.Set(float(intensity))
+            if color_attr.IsValid():
+                color_attr.Set(Gf.Vec3f(*color))
 
 
 @configclass
@@ -385,6 +490,8 @@ class EventCfg:
         },
     )
 
+    randomize_banana_pose_dr = None
+
     reset_sync_gripper_camera = EventTerm(
         func=sync_gripper_camera_to_frame,
         mode="reset",
@@ -399,9 +506,13 @@ class EventCfg:
         func=randomize_robot_color,
         mode="reset",
         params={
-            "color_names": ["orange", "teal", "white", "black"],
+            "color_names": ["white"],
         },
     )
+
+    randomize_robot_appearance_dr = None
+
+    randomize_scene_visuals_dr = None
 
 def banana_pose(env):
     banana = env.scene["banana"]

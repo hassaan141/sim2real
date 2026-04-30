@@ -1,5 +1,5 @@
-import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
@@ -62,10 +62,20 @@ class TeleopDatasetRecorder:
 
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-        if os.path.exists(self.config.dataset_root):
+        dataset_root = Path(self.config.dataset_root)
+        metadata_paths = [
+            dataset_root / "meta" / "tasks.parquet",
+            dataset_root / "meta" / "info.json",
+        ]
+        if dataset_root.exists() and any(path.exists() for path in metadata_paths):
             self._dataset = LeRobotDataset(self.config.repo_id, root=self.config.dataset_root)
             print(f"[INFO]: Existing LeRobot dataset initialized: {self.config.dataset_root}")
             return
+        if dataset_root.exists() and any(dataset_root.iterdir()):
+            raise RuntimeError(
+                f"Dataset root exists but is not an initialized LeRobot dataset: {self.config.dataset_root}. "
+                "Remove it or choose a fresh --repo-root."
+            )
 
         self._dataset = LeRobotDataset.create(
             self.config.repo_id,

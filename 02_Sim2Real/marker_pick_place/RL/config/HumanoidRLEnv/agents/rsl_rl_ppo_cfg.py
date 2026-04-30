@@ -18,7 +18,7 @@ class BananaPickPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 600
     save_interval = 50
     experiment_name = "banana_grasp_so100"
-    empirical_normalization = True
+    empirical_normalization = False
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,

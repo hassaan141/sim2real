@@ -2,6 +2,7 @@
 02_Sim2Real/isaac_so_arm101/
 02_Sim2Real/so-arm101-ros2-bridge/
 Sim-to-Real-SO-101-Workshop/
+datasets/
 
 # large binary files
 *.pt
