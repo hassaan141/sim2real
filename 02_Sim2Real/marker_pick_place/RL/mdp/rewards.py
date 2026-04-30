@@ -144,12 +144,13 @@ def gripper_grasp_shaping(
 def banana_height(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Reward how much the banana has been lifted off the table.
 
-    Proportional to height above the resting z, clamped to zero below it.
-    This is zero until the gripper actually closes and picks the banana up,
-    providing a dense gradient that bridges the approach and lift phases.
+    Clamped on both ends: below zero suppresses noise / fall-through, above
+    0.5 m caps physics-divergence spikes (e.g. a hard contact glitch sending
+    the banana to a huge z) that would otherwise produce inf value targets
+    and crash training.
     """
-    banana_z = env.scene["banana"].data.root_pos_w[:, 2]
-    return torch.clamp(banana_z - _BANANA_TABLE_Z, min=0.0) * 5.0
+    banana_z = torch.nan_to_num(env.scene["banana"].data.root_pos_w[:, 2], nan=_BANANA_TABLE_Z, posinf=_BANANA_TABLE_Z, neginf=_BANANA_TABLE_Z)
+    return torch.clamp(banana_z - _BANANA_TABLE_Z, min=0.0, max=0.5) * 5.0
 
 
 def grasp_confirmed(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -158,7 +159,7 @@ def grasp_confirmed(env: ManagerBasedRLEnv) -> torch.Tensor:
     Lifting requires the gripper to be closed, so this implicitly rewards a
     stable grasp without contact sensors.
     """
-    banana_z = env.scene["banana"].data.root_pos_w[:, 2]
+    banana_z = torch.nan_to_num(env.scene["banana"].data.root_pos_w[:, 2], nan=_BANANA_TABLE_Z, posinf=_BANANA_TABLE_Z, neginf=_BANANA_TABLE_Z)
     return (banana_z > _LIFT_THRESHOLD_Z).float()
 
 
@@ -172,7 +173,7 @@ def grasp_confirmed_termination(env: ManagerBasedRLEnv) -> torch.Tensor:
     Ends the episode early so the large grasp_confirmed bonus is collected
     and a new episode begins, keeping training dense.
     """
-    banana_z = env.scene["banana"].data.root_pos_w[:, 2]
+    banana_z = torch.nan_to_num(env.scene["banana"].data.root_pos_w[:, 2], nan=_BANANA_TABLE_Z, posinf=_BANANA_TABLE_Z, neginf=_BANANA_TABLE_Z)
     return banana_z > _LIFT_THRESHOLD_Z
 
 
