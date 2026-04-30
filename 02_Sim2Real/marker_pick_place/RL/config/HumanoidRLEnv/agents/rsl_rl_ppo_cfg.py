@@ -18,10 +18,11 @@ class BananaPickPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 600
     save_interval = 50
     experiment_name = "banana_grasp_so100"
-    empirical_normalization = False
+    empirical_normalization = True
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
+        noise_std_type="log",
         actor_obs_normalization=False,
         critic_obs_normalization=False,
         actor_hidden_dims=[256, 128, 64],
@@ -33,13 +34,13 @@ class BananaPickPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=1e-3,
+        entropy_coef=5e-3,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1e-3,
+        learning_rate=5e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.02,
+        desired_kl=0.01,
         max_grad_norm=1.0,
     )

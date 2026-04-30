@@ -79,10 +79,14 @@ camera_cfg = CameraCfg(
     ),
 )
 
-# Screenshot-tuned camera poses from Isaac Sim. These use the same 640x480,
-# 13.5 mm focal length, 0.05 m focus distance, and OpenGL convention above.
-GRIPPER_CAMERA_POS = (-0.0131, 0.10462, -0.07344)
-GRIPPER_CAMERA_ROT_DEG = (-84.84, -3.105, 88.952)
+# Gripper-local camera pose.
+# Position comes from: inv(T_world_gripper) * T_world_camera.
+# Rotation is a direct wxyz quaternion. Do not convert this through Euler degrees.
+GRIPPER_CAMERA_POS = (0.02660, 0.01421, -0.09602)
+
+# This rotation points the camera optical axis back toward the gripper pose.
+# Quaternion convention: w, x, y, z.
+GRIPPER_CAMERA_ROT = (-0.15123, 0.40528, -0.90154, -0.01034)
 
 
 def _xform_attr(prim, attr_name, add_op):
@@ -174,7 +178,7 @@ class MarkerSceneCfg(InteractiveSceneCfg):
     gripper_cam.height = 240
     gripper_cam.spawn.focus_distance = 0.05
     gripper_cam.offset.pos = GRIPPER_CAMERA_POS
-    gripper_cam.offset.rot = euler_angles_to_quat(np.array(GRIPPER_CAMERA_ROT_DEG), degrees=True)
+    gripper_cam.offset.rot = GRIPPER_CAMERA_ROT
 
     ground = AssetBaseCfg(
         prim_path="/World/Ground",

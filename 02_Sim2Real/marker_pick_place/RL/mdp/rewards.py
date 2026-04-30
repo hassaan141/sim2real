@@ -104,45 +104,37 @@ def reach_banana(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    """Dense reward: drive the gripper toward the banana.
+    """Dense, monotonically increasing reward toward the banana.
 
-    Inverse-square shaping gives a non-vanishing gradient at all distances.
-    Doubles the reward inside the 10 cm pre-grasp zone to sharpen alignment.
+    Exponential with a 5 cm characteristic length keeps the gradient alive
+    all the way to contact, instead of saturating before the gripper arrives.
     """
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     ee_pos = ee_frame.data.target_pos_w[:, 0, :]
     banana_pos = env.scene["banana"].data.root_pos_w
 
     dist = torch.norm(banana_pos - ee_pos, dim=-1)
-    r = (1.0 / (1.0 + dist ** 2)) ** 2
-    return torch.where(dist <= 0.10, 2.0 * r, r)
+    return torch.exp(-dist / 0.05)
 
 
-def gripper_open_while_approaching(
+def gripper_grasp_shaping(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    """Keep the gripper open until it is near and well aligned."""
+    """Continuous reward for closing the gripper at a good grasp pose.
+
+    pose_score is high when the EE is close *and* well aligned with the
+    banana long axis; closed_score is high when the gripper joint is near
+    the closed position.  The product pays zero when the gripper sits at
+    the default-open pose (no free reward for doing nothing) and grows
+    smoothly as the policy moves into a grasp pose and squeezes.
+    """
     dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
-    open_score = _gripper_open_score(env)
-
-    still_approaching = dist > 0.075
-    not_aligned = perp_score < 0.70
-    should_be_open = still_approaching | not_aligned
-    return should_be_open.float() * open_score
-
-
-def gripper_close_when_aligned(
-    env: ManagerBasedRLEnv,
-    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
-) -> torch.Tensor:
-    """Reward closing only when the gripper is close and perpendicular."""
-    dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
-    open_score = _gripper_open_score(env)
-    closed_score = 1.0 - open_score
-
-    ready_to_grasp = (dist < 0.075) & (perp_score > 0.70)
-    return ready_to_grasp.float() * closed_score
+    proximity = torch.exp(-dist / 0.04)
+    alignment = torch.clamp(perp_score, 0.0, 1.0)
+    pose_score = proximity * alignment
+    closed_score = 1.0 - _gripper_open_score(env)
+    return pose_score * closed_score
 
 
 # ---------------------------------------------------------------------------
