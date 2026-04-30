@@ -93,7 +93,7 @@ class ActionsCfg:
             "elbow_flex": 0.15,
             "wrist_flex": 0.15,
             "wrist_roll": 0.15,
-            "gripper": 0.8,
+            "gripper": 1.4,
         },
         use_default_offset=True,
     )
@@ -150,12 +150,16 @@ class RewardsCfg:
         params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
     )
 
-    # Continuous grasp shaping: pays only for *closing* the gripper, in
-    # proportion to how close and well-aligned the EE is. No free reward for
-    # the default-open pose, no AND-gated cliff to cross.
-    gripper_grasp_shaping = RewTerm(
-        func=mdp.gripper_grasp_shaping,
-        weight=1.5,
+    # Gripper shaping: keep the hand open while approaching, then close once
+    # near and perpendicular enough to make a plausible grasp.
+    gripper_open_while_approaching = RewTerm(
+        func=mdp.gripper_open_while_approaching,
+        weight=0.25,
+        params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
+    )
+    gripper_close_when_aligned = RewTerm(
+        func=mdp.gripper_close_when_aligned,
+        weight=0.75,
         params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
     )
 

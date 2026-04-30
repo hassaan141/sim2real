@@ -47,7 +47,7 @@ def _ee_banana_distance_and_alignment(
     ee_pos = ee_frame.data.target_pos_w[:, 0, :]
     banana_pos = env.scene["banana"].data.root_pos_w
 
-    dist = torch.nan_to_num(torch.norm(banana_pos - ee_pos, dim=-1), nan=1.0, posinf=1.0)
+    dist = torch.norm(banana_pos - ee_pos, dim=-1)
 
     banana_quat = env.scene["banana"].data.root_quat_w
     long_local = torch.tensor(
@@ -64,7 +64,7 @@ def _ee_banana_distance_and_alignment(
     gripper_close = gripper_close / (gripper_close.norm(dim=-1, keepdim=True) + 1e-6)
 
     cos_angle = torch.abs((banana_long * gripper_close).sum(dim=-1))
-    perp_score = torch.nan_to_num(1.0 - cos_angle, nan=0.0)
+    perp_score = 1.0 - cos_angle
     return dist, perp_score
 
 
@@ -104,37 +104,45 @@ def reach_banana(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    """Dense, monotonically increasing reward toward the banana.
+    """Dense reward: drive the gripper toward the banana.
 
-    Exponential with a 5 cm characteristic length keeps the gradient alive
-    all the way to contact, instead of saturating before the gripper arrives.
+    Inverse-square shaping gives a non-vanishing gradient at all distances.
+    Doubles the reward inside the 10 cm pre-grasp zone to sharpen alignment.
     """
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     ee_pos = ee_frame.data.target_pos_w[:, 0, :]
     banana_pos = env.scene["banana"].data.root_pos_w
 
     dist = torch.norm(banana_pos - ee_pos, dim=-1)
-    return torch.exp(-dist / 0.05)
+    r = (1.0 / (1.0 + dist ** 2)) ** 2
+    return torch.where(dist <= 0.10, 2.0 * r, r)
 
 
-def gripper_grasp_shaping(
+def gripper_open_while_approaching(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
 ) -> torch.Tensor:
-    """Continuous reward for closing the gripper at a good grasp pose.
-
-    pose_score is high when the EE is close *and* well aligned with the
-    banana long axis; closed_score is high when the gripper joint is near
-    the closed position.  The product pays zero when the gripper sits at
-    the default-open pose (no free reward for doing nothing) and grows
-    smoothly as the policy moves into a grasp pose and squeezes.
-    """
+    """Keep the gripper open until it is near and well aligned."""
     dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
-    proximity = torch.exp(-dist / 0.04)
-    alignment = torch.clamp(perp_score, 0.0, 1.0)
-    pose_score = proximity * alignment
-    closed_score = 1.0 - _gripper_open_score(env)
-    return pose_score * closed_score
+    open_score = _gripper_open_score(env)
+
+    still_approaching = dist > 0.075
+    not_aligned = perp_score < 0.70
+    should_be_open = still_approaching | not_aligned
+    return should_be_open.float() * open_score
+
+
+def gripper_close_when_aligned(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward closing only when the gripper is close and perpendicular."""
+    dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
+    open_score = _gripper_open_score(env)
+    closed_score = 1.0 - open_score
+
+    ready_to_grasp = (dist < 0.075) & (perp_score > 0.70)
+    return ready_to_grasp.float() * closed_score
 
 
 # ---------------------------------------------------------------------------
@@ -144,13 +152,12 @@ def gripper_grasp_shaping(
 def banana_height(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Reward how much the banana has been lifted off the table.
 
-    Clamped on both ends: below zero suppresses noise / fall-through, above
-    0.5 m caps physics-divergence spikes (e.g. a hard contact glitch sending
-    the banana to a huge z) that would otherwise produce inf value targets
-    and crash training.
+    Proportional to height above the resting z, clamped to zero below it.
+    This is zero until the gripper actually closes and picks the banana up,
+    providing a dense gradient that bridges the approach and lift phases.
     """
-    banana_z = torch.nan_to_num(env.scene["banana"].data.root_pos_w[:, 2], nan=_BANANA_TABLE_Z, posinf=_BANANA_TABLE_Z, neginf=_BANANA_TABLE_Z)
-    return torch.clamp(banana_z - _BANANA_TABLE_Z, min=0.0, max=0.5) * 5.0
+    banana_z = env.scene["banana"].data.root_pos_w[:, 2]
+    return torch.clamp(banana_z - _BANANA_TABLE_Z, min=0.0) * 5.0
 
 
 def grasp_confirmed(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -159,7 +166,7 @@ def grasp_confirmed(env: ManagerBasedRLEnv) -> torch.Tensor:
     Lifting requires the gripper to be closed, so this implicitly rewards a
     stable grasp without contact sensors.
     """
-    banana_z = torch.nan_to_num(env.scene["banana"].data.root_pos_w[:, 2], nan=_BANANA_TABLE_Z, posinf=_BANANA_TABLE_Z, neginf=_BANANA_TABLE_Z)
+    banana_z = env.scene["banana"].data.root_pos_w[:, 2]
     return (banana_z > _LIFT_THRESHOLD_Z).float()
 
 
@@ -173,7 +180,7 @@ def grasp_confirmed_termination(env: ManagerBasedRLEnv) -> torch.Tensor:
     Ends the episode early so the large grasp_confirmed bonus is collected
     and a new episode begins, keeping training dense.
     """
-    banana_z = torch.nan_to_num(env.scene["banana"].data.root_pos_w[:, 2], nan=_BANANA_TABLE_Z, posinf=_BANANA_TABLE_Z, neginf=_BANANA_TABLE_Z)
+    banana_z = env.scene["banana"].data.root_pos_w[:, 2]
     return banana_z > _LIFT_THRESHOLD_Z
 
 
