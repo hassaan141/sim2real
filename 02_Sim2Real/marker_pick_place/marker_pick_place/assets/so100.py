@@ -5,19 +5,12 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.sim.spawners.from_files import spawn_from_usd
-from isaaclab.sim.utils import bind_physics_material, clone, get_current_stage
+from isaaclab.sim.utils import clone
 from isaacsim.core.utils.rotations import euler_angles_to_quat
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "../.."))
-GRIPPER_PHYSICS_MATERIAL = sim_utils.RigidBodyMaterialCfg(
-    static_friction=2.0,
-    dynamic_friction=1.4,
-    restitution=0.0,
-    friction_combine_mode="max",
-    restitution_combine_mode="min",
-)
 
 
 @clone
@@ -28,27 +21,7 @@ def spawn_so100_with_gripper_physics(
     orientation: tuple[float, float, float, float] | None = None,
     **kwargs,
 ):
-    prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
-    stage = get_current_stage()
-    material_path = f"{prim_path}/gripperPhysicsMaterial"
-    GRIPPER_PHYSICS_MATERIAL.func(material_path, GRIPPER_PHYSICS_MATERIAL)
-
-    # Support both raw and baked USD collider layouts.
-    fingertip_meshes = [
-        f"{prim_path}/gripper/collisions/Fixed_Jaw/mesh",
-        f"{prim_path}/jaw/collisions/Moving_Jaw/mesh",
-        f"{prim_path}/colliders/gripper/Fixed_Jaw/mesh",
-        f"{prim_path}/colliders/jaw/Moving_Jaw/mesh",
-    ]
-    for mesh_path in fingertip_meshes:
-        if stage.GetPrimAtPath(mesh_path).IsValid():
-            try:
-                bind_physics_material(mesh_path, material_path, stage=stage)
-            except Exception as exc:
-                print(f"[WARN]: Could not bind fingertip material on instance proxy {mesh_path}: {exc}")
-        else:
-            print(f"[WARN]: Expected SO100 fingertip collider not found: {mesh_path}")
-    return prim
+    return spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
 
 SO100_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -83,7 +56,7 @@ SO100_CFG = ArticulationCfg(
             "elbow_flex": -1.57,
             "wrist_flex": 1.0,
             "wrist_roll": -1.57,
-            "gripper": 0.0,
+            "gripper": 1.2,
         },
     ),
     actuators={

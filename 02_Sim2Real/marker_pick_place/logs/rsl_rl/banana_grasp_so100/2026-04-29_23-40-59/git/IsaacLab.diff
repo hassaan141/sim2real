@@ -1,0 +1,216 @@
+--- git commit ---
+4df6560e187f2cc66685b41b21b259f4485d0c22
+
+
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/environments/teleoperation/teleop_se3_agent.py
+	modified:   source/isaaclab/isaaclab/devices/openxr/manus_vive_utils.py
+	modified:   source/isaaclab/isaaclab/devices/openxr/openxr_device.py
+	modified:   source/isaaclab/isaaclab/sim/utils/semantics.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/fixed_base_upper_body_ik_g1_env_cfg.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.codex
+	ISAACLAB_INTERVIEW_PREP.md
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/environments/teleoperation/teleop_se3_agent.py b/scripts/environments/teleoperation/teleop_se3_agent.py
+index 8492ad77f..87190a57d 100644
+--- a/scripts/environments/teleoperation/teleop_se3_agent.py
++++ b/scripts/environments/teleoperation/teleop_se3_agent.py
+@@ -12,6 +12,8 @@ controllers)."""
+ """Launch Isaac Sim Simulator first."""
+ 
+ import argparse
++import os
++import time
+ from collections.abc import Callable
+ 
+ from isaaclab.app import AppLauncher
+@@ -80,6 +82,7 @@ if args_cli.enable_pinocchio:
+ 
+ # import logger
+ logger = logging.getLogger(__name__)
++DEBUG_ACTIONS = os.environ.get("ISAAC_TELEOP_DEBUG_ACTIONS", "0") == "1"
+ 
+ 
+ def main() -> None:
+@@ -243,6 +246,7 @@ def main() -> None:
+     teleop_interface.reset()
+ 
+     print("Teleoperation started. Press 'R' to reset the environment.")
++    last_debug_print_time = 0.0
+ 
+     # simulate environment
+     while simulation_app.is_running():
+@@ -251,7 +255,11 @@ def main() -> None:
+             with torch.inference_mode():
+                 # get device command
+                 action = teleop_interface.advance()
+-
++                if DEBUG_ACTIONS:
++                    now = time.monotonic()
++                    if now - last_debug_print_time > 0.5:
++                        print(f"DEBUG handtracking action: {action.detach().cpu().numpy()}")
++                        last_debug_print_time = no
+                 # Only apply teleop commands when active
+                 if teleoperation_active:
+                     # process actions
+diff --git a/source/isaaclab/isaaclab/devices/openxr/manus_vive_utils.py b/source/isaaclab/isaaclab/devices/openxr/manus_vive_utils.py
+index 80c0b346b..e8e22afae 100644
+--- a/source/isaaclab/isaaclab/devices/openxr/manus_vive_utils.py
++++ b/source/isaaclab/isaaclab/devices/openxr/manus_vive_utils.py
+@@ -15,7 +15,17 @@ from isaacsim.core.utils.extensions import enable_extension
+ XRCore, XRPoseValidityFlags = None, None
+ 
+ with contextlib.suppress(ModuleNotFoundError):
+-    from omni.kit.xr.core import XRCore, XRPoseValidityFlags
++    import omni.kit.xr.core as xr_core
++
++    XRCore = getattr(xr_core, "XRCore", None)
++    XRPoseValidityFlags = getattr(xr_core, "XRPoseValidityFlags", None)
++
++
++if XRPoseValidityFlags is None:
++
++    class XRPoseValidityFlags:
++        POSITION_VALID = 1
++        ORIENTATION_VALID = 2
+ 
+ from pxr import Gf
+ 
+diff --git a/source/isaaclab/isaaclab/devices/openxr/openxr_device.py b/source/isaaclab/isaaclab/devices/openxr/openxr_device.py
+index 49f423fe8..5b67f05a8 100644
+--- a/source/isaaclab/isaaclab/devices/openxr/openxr_device.py
++++ b/source/isaaclab/isaaclab/devices/openxr/openxr_device.py
+@@ -33,7 +33,18 @@ XRPoseValidityFlags = None
+ XRCoreEventType = None
+ 
+ with contextlib.suppress(ModuleNotFoundError):
+-    from omni.kit.xr.core import XRCore, XRCoreEventType, XRPoseValidityFlags
++    import omni.kit.xr.core as xr_core
++
++    XRCore = getattr(xr_core, "XRCore", None)
++    XRCoreEventType = getattr(xr_core, "XRCoreEventType", None)
++    XRPoseValidityFlags = getattr(xr_core, "XRPoseValidityFlags", None)
++
++
++if XRPoseValidityFlags is None:
++
++    class XRPoseValidityFlags:
++        POSITION_VALID = 1
++        ORIENTATION_VALID = 2
+ 
+ from isaacsim.core.prims import SingleXFormPrim
+ 
+@@ -305,19 +316,29 @@ class OpenXRDevice(DeviceBase):
+         if hand_device is None:
+             return previous_joint_poses
+ 
+-        joint_poses = hand_device.get_all_virtual_world_poses()
++        if hasattr(hand_device, "get_all_virtual_world_poses"):
++            joint_poses = hand_device.get_all_virtual_world_poses()
++        else:
++            joint_poses = {}
++            for pose_name in hand_device.get_pose_names():
++                pose_name = str(pose_name)
++                if pose_name in HAND_JOINT_NAMES:
++                    joint_poses[pose_name] = hand_device.get_virtual_world_pose(pose_name)
+ 
+         # Update each joint that is present in the current data
+         for joint_name, joint_pose in joint_poses.items():
+             if joint_name in HAND_JOINT_NAMES:
+                 # Extract translation and rotation
+-                if joint_pose.validity_flags & XRPoseValidityFlags.POSITION_VALID:
+-                    position = joint_pose.pose_matrix.ExtractTranslation()
++                pose_matrix = getattr(joint_pose, "pose_matrix", joint_pose)
++                validity_flags = getattr(joint_pose, "validity_flags", None)
++
++                if validity_flags is None or validity_flags & XRPoseValidityFlags.POSITION_VALID:
++                    position = pose_matrix.ExtractTranslation()
+                 else:
+                     position = previous_joint_poses[joint_name][:3]
+ 
+-                if joint_pose.validity_flags & XRPoseValidityFlags.ORIENTATION_VALID:
+-                    quat = joint_pose.pose_matrix.ExtractRotationQuat()
++                if validity_flags is None or validity_flags & XRPoseValidityFlags.ORIENTATION_VALID:
++                    quat = pose_matrix.ExtractRotationQuat()
+                     quati = quat.GetImaginary()
+                     quatw = quat.GetReal()
+                 else:
+diff --git a/source/isaaclab/isaaclab/sim/utils/semantics.py b/source/isaaclab/isaaclab/sim/utils/semantics.py
+index 463eb8b5d..b9589b797 100644
+--- a/source/isaaclab/isaaclab/sim/utils/semantics.py
++++ b/source/isaaclab/isaaclab/sim/utils/semantics.py
+@@ -53,7 +53,7 @@ def add_labels(prim: Usd.Prim, labels: list[str], instance_name: str = "class",
+         rep_functional.modify.semantics(prim, {instance_name: labels}, mode=mode)
+ 
+         return
+-    except (ModuleNotFoundError, ImportError) as e:
++    except (ModuleNotFoundError, ImportError, AttributeError) as e:
+         # check if we are using isaac sim 5.0
+         if get_isaac_sim_version().major >= 5:
+             logger.warning(
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/fixed_base_upper_body_ik_g1_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/fixed_base_upper_body_ik_g1_env_cfg.py
+index 87c100a6c..7abee277a 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/fixed_base_upper_body_ik_g1_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/fixed_base_upper_body_ik_g1_env_cfg.py
+@@ -64,8 +64,8 @@ class FixedBaseUpperBodyIKG1SceneCfg(InteractiveSceneCfg):
+         ),
+     )
+ 
+-    # Unitree G1 Humanoid robot - fixed base configuration
+-    robot: ArticulationCfg = G1_29DOF_CFG
++    # Unitree G1 Humanoid robot - gravity-off upper-body validation configuration.
++    robot: ArticulationCfg = G1_29DOF_CFG.copy()
+ 
+     # Ground plane
+     ground = AssetBaseCfg(
+@@ -81,8 +81,12 @@ class FixedBaseUpperBodyIKG1SceneCfg(InteractiveSceneCfg):
+ 
+     def __post_init__(self):
+         """Post initialization."""
+-        # Set the robot to fixed base
+-        self.robot.spawn.articulation_props.fix_root_link = True
++        # The G1 USD has its articulation API on the robot container prim rather than
++        # directly on the first rigid body link, so Isaac Lab cannot auto-create the
++        # fixed joint for fix_root_link=True. Disable gravity instead for the first
++        # upper-body XR retargeting validation pass.
++        self.robot.spawn.articulation_props.fix_root_link = False
++        self.robot.spawn.rigid_props.disable_gravity = True
+ 
+ 
+ @configclass
+@@ -191,7 +195,7 @@ class FixedBaseUpperBodyIKG1EnvCfg(ManagerBasedRLEnvCfg):
+         self.sim.render_interval = 2
+ 
+         # Set the URDF and mesh paths for the IK controller
+-        urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
++        urdf_omniverse_path = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.0/Isaac/IsaacLab/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
+ 
+         # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
+         self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py
+index 9ff8102fe..b351706be 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/manager_based/locomanipulation/pick_place/locomanipulation_g1_env_cfg.py
+@@ -208,7 +208,7 @@ class LocomanipulationG1EnvCfg(ManagerBasedRLEnvCfg):
+         self.sim.render_interval = 2
+ 
+         # Set the URDF and mesh paths for the IK controller
+-        urdf_omniverse_path = f"{ISAACLAB_NUCLEUS_DIR}/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
++        urdf_omniverse_path = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.0/Isaac/IsaacLab/Controllers/LocomanipulationAssets/unitree_g1_kinematics_asset/g1_29dof_with_hand_only_kinematics.urdf"  # noqa: E501
+ 
+         # Retrieve local paths for the URDF and mesh files. Will be cached for call after the first time.
+         self.actions.upper_body_ik.controller.urdf_path = retrieve_file_path(urdf_omniverse_path)

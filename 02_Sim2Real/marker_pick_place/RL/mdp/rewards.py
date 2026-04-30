@@ -29,10 +29,54 @@ _ORIENT_GATE_DIST = 0.15
 # Banana must rise this much above the table for a grasp to be considered confirmed.
 _LIFT_THRESHOLD_Z = _BANANA_TABLE_Z + 0.015  # 1.5 cm
 
+# SO100 gripper joint positions. Teleop maps the joint roughly from -0.2 to
+# 2.0 rad; the RL task starts open and rewards closing only at the grasp pose.
+_GRIPPER_OPEN_POS = 1.2
+_GRIPPER_CLOSED_POS = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Phase 1 — Local approach / alignment
 # ---------------------------------------------------------------------------
+
+def _ee_banana_distance_and_alignment(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_pos = ee_frame.data.target_pos_w[:, 0, :]
+    banana_pos = env.scene["banana"].data.root_pos_w
+
+    dist = torch.norm(banana_pos - ee_pos, dim=-1)
+
+    banana_quat = env.scene["banana"].data.root_quat_w
+    long_local = torch.tensor(
+        [_BANANA_LONG_AXIS_LOCAL], device=env.device, dtype=torch.float32
+    ).expand(env.num_envs, -1)
+    banana_long = math_utils.quat_apply(banana_quat, long_local)
+    banana_long = banana_long / (banana_long.norm(dim=-1, keepdim=True) + 1e-6)
+
+    ee_quat = ee_frame.data.target_quat_w[:, 0, :]
+    close_local = torch.tensor(
+        [_GRIPPER_CLOSE_AXIS_LOCAL], device=env.device, dtype=torch.float32
+    ).expand(env.num_envs, -1)
+    gripper_close = math_utils.quat_apply(ee_quat, close_local)
+    gripper_close = gripper_close / (gripper_close.norm(dim=-1, keepdim=True) + 1e-6)
+
+    cos_angle = torch.abs((banana_long * gripper_close).sum(dim=-1))
+    perp_score = 1.0 - cos_angle
+    return dist, perp_score
+
+
+def _gripper_open_score(env: ManagerBasedRLEnv) -> torch.Tensor:
+    robot = env.scene["robot"]
+    ids, _ = robot.find_joints("gripper")
+    gripper_pos = robot.data.joint_pos[:, ids[0]]
+    return torch.clamp(
+        (gripper_pos - _GRIPPER_CLOSED_POS) / (_GRIPPER_OPEN_POS - _GRIPPER_CLOSED_POS),
+        min=0.0,
+        max=1.0,
+    )
 
 def gripper_perpendicular_to_banana(
     env: ManagerBasedRLEnv,
@@ -50,32 +94,8 @@ def gripper_perpendicular_to_banana(
     Tune constants at the top of this file if the wrong axis is assumed for
     the banana USD or the SO100 gripper USD.
     """
-    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    ee_pos = ee_frame.data.target_pos_w[:, 0, :]
-    banana_pos = env.scene["banana"].data.root_pos_w
-
-    dist = torch.norm(banana_pos - ee_pos, dim=-1)
+    dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
     is_near = (dist < _ORIENT_GATE_DIST).float()
-
-    # Banana long axis in world frame.
-    banana_quat = env.scene["banana"].data.root_quat_w
-    long_local = torch.tensor(
-        [_BANANA_LONG_AXIS_LOCAL], device=env.device, dtype=torch.float32
-    ).expand(env.num_envs, -1)
-    banana_long = math_utils.quat_apply(banana_quat, long_local)
-    banana_long = banana_long / (banana_long.norm(dim=-1, keepdim=True) + 1e-6)
-
-    # Gripper closing axis in world frame.
-    ee_quat = ee_frame.data.target_quat_w[:, 0, :]
-    close_local = torch.tensor(
-        [_GRIPPER_CLOSE_AXIS_LOCAL], device=env.device, dtype=torch.float32
-    ).expand(env.num_envs, -1)
-    gripper_close = math_utils.quat_apply(ee_quat, close_local)
-    gripper_close = gripper_close / (gripper_close.norm(dim=-1, keepdim=True) + 1e-6)
-
-    # |cos θ| = 1 when parallel (bad), 0 when perpendicular (good).
-    cos_angle = torch.abs((banana_long * gripper_close).sum(dim=-1))
-    perp_score = 1.0 - cos_angle  # 1.0 = perfect alignment, 0.0 = wrong angle
 
     return is_near * perp_score
 
@@ -96,6 +116,33 @@ def reach_banana(
     dist = torch.norm(banana_pos - ee_pos, dim=-1)
     r = (1.0 / (1.0 + dist ** 2)) ** 2
     return torch.where(dist <= 0.10, 2.0 * r, r)
+
+
+def gripper_open_while_approaching(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Keep the gripper open until it is near and well aligned."""
+    dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
+    open_score = _gripper_open_score(env)
+
+    still_approaching = dist > 0.075
+    not_aligned = perp_score < 0.70
+    should_be_open = still_approaching | not_aligned
+    return should_be_open.float() * open_score
+
+
+def gripper_close_when_aligned(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Reward closing only when the gripper is close and perpendicular."""
+    dist, perp_score = _ee_banana_distance_and_alignment(env, ee_frame_cfg)
+    open_score = _gripper_open_score(env)
+    closed_score = 1.0 - open_score
+
+    ready_to_grasp = (dist < 0.075) & (perp_score > 0.70)
+    return ready_to_grasp.float() * closed_score
 
 
 # ---------------------------------------------------------------------------

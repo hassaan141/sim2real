@@ -10,7 +10,9 @@ Optional flags:
     --video               record rollout videos during training
 """
 import argparse
+import importlib.metadata as metadata
 import os
+import pickle
 import sys
 from datetime import datetime
 
@@ -47,8 +49,8 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_pickle, dump_yaml
-from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+from isaaclab.utils.io import dump_yaml
+from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import RL  # noqa: F401 — triggers gym.register for Banana-PickPlace-v0
 
@@ -59,6 +61,12 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+
+def dump_pickle(filename: str, data) -> None:
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "wb") as f:
+        pickle.dump(data, f)
 
 
 def main():
@@ -72,6 +80,8 @@ def main():
     if args_cli.seed is not None:
         env_cfg.seed = args_cli.seed
         agent_cfg.seed = args_cli.seed
+
+    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, metadata.version("rsl-rl-lib"))
 
     env_cfg.sim.device = args_cli.device
     agent_cfg.device = args_cli.device

@@ -54,7 +54,12 @@ class BananaSceneCfg(InteractiveSceneCfg):
 
     ground = AssetBaseCfg(
         prim_path="/World/Ground",
-        spawn=sim_utils.GroundPlaneCfg(),
+        spawn=sim_utils.CuboidCfg(
+            size=(3.0, 3.0, 0.01),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.45, 0.42)),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.005)),
     )
 
     light = AssetBaseCfg(
@@ -67,8 +72,9 @@ class BananaSceneCfg(InteractiveSceneCfg):
 class ActionsCfg:
     """6-DOF joint position control with small action scale.
 
-    scale=0.15 limits the policy to ±0.15 rad corrections per step, enforcing
-    that only local wrist/gripper adjustments are made (not coarse repositioning).
+    Arm joints are limited to ±0.15 rad corrections per step so the policy
+    only makes local approach/alignment adjustments. The gripper has a wider
+    action range so it can start open and still close around the object.
     """
 
     joint_positions = mdp.JointPositionActionCfg(
@@ -81,7 +87,14 @@ class ActionsCfg:
             "wrist_roll",
             "gripper",
         ],
-        scale=0.15,
+        scale={
+            "shoulder_pan": 0.15,
+            "shoulder_lift": 0.15,
+            "elbow_flex": 0.15,
+            "wrist_flex": 0.15,
+            "wrist_roll": 0.15,
+            "gripper": 1.4,
+        },
         use_default_offset=True,
     )
 
@@ -134,6 +147,19 @@ class RewardsCfg:
     reach_banana = RewTerm(
         func=mdp.reach_banana,
         weight=1.0,
+        params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
+    )
+
+    # Gripper shaping: keep the hand open while approaching, then close once
+    # near and perpendicular enough to make a plausible grasp.
+    gripper_open_while_approaching = RewTerm(
+        func=mdp.gripper_open_while_approaching,
+        weight=0.25,
+        params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
+    )
+    gripper_close_when_aligned = RewTerm(
+        func=mdp.gripper_close_when_aligned,
+        weight=0.75,
         params={"ee_frame_cfg": SceneEntityCfg("ee_frame")},
     )
 

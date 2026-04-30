@@ -22,7 +22,7 @@ parser.add_argument("--debug-control-interval", type=int, default=30)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-args_cli.enable_cameras = args_cli.enable_cameras or args_cli.record
+args_cli.enable_cameras = True
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -36,6 +36,7 @@ from pxr import Usd, UsdPhysics, UsdShade
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 import marker_pick_place.tasks  # noqa: F401
+from marker_pick_place.tasks.marker_env_cfg import refresh_config_cameras, sync_gripper_camera_to_frame
 
 
 JOINT_NAMES = [
@@ -46,6 +47,7 @@ JOINT_NAMES = [
     "wrist_roll",
     "gripper",
 ]
+CAMERA_SENSOR_NAMES = ["env_cam", "gripper_cam"]
 
 
 def _print_robot_actuator_config(env) -> None:
@@ -148,16 +150,15 @@ def _print_control_debug(
 
 def _disable_camera_pipeline(env_cfg) -> None:
     """Keep control-only runs from paying the camera sensor/render cost."""
-    env_cfg.scene.camera_top = None
-    env_cfg.scene.camera_side = None
-    env_cfg.scene.camera_ego = None
-    env_cfg.scene.camera_iphone = None
+    env_cfg.scene.env_cam = None
+    env_cfg.scene.gripper_cam = None
+    env_cfg.events.startup_refresh_camera_xforms = None
     env_cfg.events.refresh_camera_xforms = None
+    env_cfg.events.reset_sync_gripper_camera = None
+    env_cfg.events.sync_gripper_camera = None
 
-    env_cfg.observations.visual.rgb_ego = None
-    env_cfg.observations.visual.rgb_top = None
-    env_cfg.observations.visual.rgb_side = None
-    env_cfg.observations.visual.rgb_iphone = None
+    env_cfg.observations.visual.rgb_env = None
+    env_cfg.observations.visual.rgb_gripper = None
 
 
 def _warmup_render(steps: int = 12) -> None:
@@ -168,12 +169,50 @@ def _warmup_render(steps: int = 12) -> None:
         sim.render()
 
 
+def _force_camera_refresh(env, cycles: int = 2) -> None:
+    sim = sim_utils.SimulationContext.instance()
+    for _ in range(cycles):
+        refresh_config_cameras(env.unwrapped, None, ["env_cam"])
+        sync_gripper_camera_to_frame(env.unwrapped, None)
+        if sim is not None:
+            sim.render()
+        for name in CAMERA_SENSOR_NAMES:
+            if name in env.unwrapped.scene.keys():
+                env.unwrapped.scene[name].update(0.0, force_recompute=True)
+
+
+def _camera_prim_path(env, camera_name: str) -> str:
+    camera_cfg = getattr(env.unwrapped.scene.cfg, camera_name)
+    return camera_cfg.prim_path.replace("{ENV_REGEX_NS}", "/World/envs/env_0")
+
+
+def _rebind_viewport_cameras(env) -> None:
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+    except Exception as exc:
+        print(f"[WARN]: Could not import viewport utility for camera rebind: {exc}")
+        return
+
+    viewport = get_active_viewport()
+    if viewport is None:
+        return
+
+    sim = sim_utils.SimulationContext.instance()
+    previous_camera = viewport.camera_path
+    for name in CAMERA_SENSOR_NAMES:
+        viewport.set_active_camera(_camera_prim_path(env, name))
+        if sim is not None:
+            sim.render()
+    if previous_camera:
+        viewport.set_active_camera(previous_camera.pathString)
+
+
 def _collect_cameras(env) -> dict:
     cameras = {}
-    for obj in env.unwrapped.scene.keys():
-        if obj.startswith("camera_"):
+    for obj in CAMERA_SENSOR_NAMES:
+        if obj in env.unwrapped.scene.keys():
             camera_cfg = getattr(env.unwrapped.scene.cfg, obj)
-            cameras[obj.replace("camera_", "")] = {
+            cameras[obj.removesuffix("_cam")] = {
                 "height": camera_cfg.height,
                 "width": camera_cfg.width,
             }
@@ -198,6 +237,8 @@ def _make_env():
     _print_runtime_joint_metadata(env, joint_indices)
     _print_physics_debug(env)
     if args_cli.enable_cameras:
+        _force_camera_refresh(env)
+        _rebind_viewport_cameras(env)
         _warmup_render()
     return env, joint_indices
 

@@ -1,9 +1,10 @@
+import os
+
 import isaaclab.sim as sim_utils
 from pxr import Usd
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.sim.spawners.from_files import spawn_from_usd
 from isaaclab.sim.utils import bind_physics_material, clone, get_current_stage
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 
 WALL_WHITE = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.90, 0.90, 0.86))
@@ -12,7 +13,15 @@ BASEBOARD_WHITE = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.94, 0.93, 0.90))
 TABLE_BLACK = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.005, 0.005, 0.004))
 CUP_BLUE = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.05, 0.22, 0.85))
 
-BANANA_USD_PATH = f"{ISAAC_NUCLEUS_DIR}/Props/YCB/Axis_Aligned/011_banana.usd"
+HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(HERE, "../.."))
+BANANA_USD_PATH = os.path.join(
+    PROJECT_ROOT,
+    "assets",
+    "banana",
+    "usd",
+    "banana_convex_decomposition.usd",
+)
 BANANA_MASS = 0.12
 BANANA_PHYSICS_MATERIAL = sim_utils.RigidBodyMaterialCfg(
     static_friction=2.0,

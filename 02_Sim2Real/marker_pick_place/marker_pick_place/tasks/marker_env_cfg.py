@@ -8,11 +8,12 @@ from isaaclab.utils import configclass
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
+from isaaclab.sensors import CameraCfg, FrameTransformerCfg
+import isaaclab.utils.math as math_utils
 from isaacsim.core.utils.rotations import euler_angles_to_quat
 from marker_pick_place.mdp import randomize_robot_color, reset_joints_by_offset
 from isaaclab.sim import get_current_stage
-from pxr import Gf, Sdf
+from pxr import Gf, Sdf, UsdGeom
 
 import torch
 
@@ -59,7 +60,7 @@ from marker_pick_place.mdp import (
 )
 
 
-camera_cfg = TiledCameraCfg(
+camera_cfg = CameraCfg(
     prim_path="",
     update_period=0.0,
     height=480,
@@ -71,23 +72,31 @@ camera_cfg = TiledCameraCfg(
         focal_length=13.5,
         focus_distance=0.05,
     ),
-    offset=TiledCameraCfg.OffsetCfg(
+    offset=CameraCfg.OffsetCfg(
         pos=(0.0, 0.0, 0.0),
         rot=euler_angles_to_quat(np.array([0, 0, 0]), degrees=True),
         convention="opengl",
     ),
 )
 
-# Screenshot-tuned camera poses from Isaac Sim.  These use the same 640x480,
+# Screenshot-tuned camera poses from Isaac Sim. These use the same 640x480,
 # 13.5 mm focal length, 0.05 m focus distance, and OpenGL convention above.
 GRIPPER_CAMERA_POS = (-0.0131, 0.10462, -0.07344)
 GRIPPER_CAMERA_ROT_DEG = (-84.84, -3.105, 88.952)
-IPHONE_CAMERA_POS = (0.44941, -0.45271, 0.61617)
-IPHONE_CAMERA_ROT_DEG = (87.30664, 22.88269, 70.37515)
 
 
-def refresh_config_cameras(env, env_ids, camera_names):
+def _xform_attr(prim, attr_name, add_op):
+    attr = prim.GetAttribute(attr_name)
+    if attr.IsValid():
+        return attr
+    return add_op(UsdGeom.Xformable(prim)).GetAttr()
+
+
+def refresh_config_cameras(env, env_ids, camera_names=None):
     """Re-apply configured camera xforms so render products initialize cleanly."""
+    if camera_names is None:
+        camera_names = ["env_cam", "gripper_cam"]
+
     stage = get_current_stage()
     camera_updates = []
     for name in camera_names:
@@ -99,18 +108,37 @@ def refresh_config_cameras(env, env_ids, camera_names):
 
     with Sdf.ChangeBlock():
         for prim, pos, _ in camera_updates:
-            translate_attr = prim.GetAttribute("xformOp:translate")
-            if translate_attr.IsValid():
-                translate_attr.Set(Gf.Vec3d(pos[0] + 1.0e-6, pos[1], pos[2]))
+            translate_attr = _xform_attr(prim, "xformOp:translate", lambda xform: xform.AddTranslateOp())
+            translate_attr.Set(Gf.Vec3d(pos[0] + 1.0e-6, pos[1], pos[2]))
 
     with Sdf.ChangeBlock():
         for prim, pos, quat in camera_updates:
-            translate_attr = prim.GetAttribute("xformOp:translate")
-            orient_attr = prim.GetAttribute("xformOp:orient")
-            if translate_attr.IsValid():
-                translate_attr.Set(Gf.Vec3d(*pos))
-            if orient_attr.IsValid():
-                orient_attr.Set(Gf.Quatd(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
+            translate_attr = _xform_attr(prim, "xformOp:translate", lambda xform: xform.AddTranslateOp())
+            orient_attr = _xform_attr(prim, "xformOp:orient", lambda xform: xform.AddOrientOp())
+            translate_attr.Set(Gf.Vec3d(*pos))
+            orient_attr.Set(Gf.Quatd(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])))
+
+
+def sync_gripper_camera_to_frame(
+    env,
+    env_ids,
+    camera_cfg=SceneEntityCfg("gripper_cam"),
+    ee_frame_cfg=SceneEntityCfg("ee_frame"),
+):
+    """Keep the external gripper camera riding on the gripper frame."""
+    camera = env.scene[camera_cfg.name]
+    ee_frame = env.scene[ee_frame_cfg.name]
+    gripper_pos = ee_frame.data.target_pos_w[:, 0, :]
+    gripper_quat = ee_frame.data.target_quat_w[:, 0, :]
+    offset_pos = torch.tensor(camera.cfg.offset.pos, device=env.device, dtype=torch.float32).repeat(env.num_envs, 1)
+    offset_quat = torch.tensor(camera.cfg.offset.rot, device=env.device, dtype=torch.float32).repeat(env.num_envs, 1)
+    camera_pos, camera_quat = math_utils.combine_frame_transforms(
+        gripper_pos,
+        gripper_quat,
+        offset_pos,
+        offset_quat,
+    )
+    camera.set_world_poses(camera_pos.to(dtype=torch.float32), camera_quat.to(dtype=torch.float32), convention="opengl")
 
 
 @configclass
@@ -135,29 +163,18 @@ class MarkerSceneCfg(InteractiveSceneCfg):
         ],
     )
 
-    camera_top = camera_cfg.replace()
-    camera_top.prim_path = "{ENV_REGEX_NS}/CameraTop"
-    camera_top.offset.pos = (0.0, 0.0, 1.15)
-    camera_top.offset.rot = euler_angles_to_quat(np.array([0, 90, 0]), degrees=True)
+    env_cam = camera_cfg.replace()
+    env_cam.prim_path = "{ENV_REGEX_NS}/EnvCam"
+    env_cam.offset.pos = (-0.55, -0.75, 0.75)
+    env_cam.offset.rot = euler_angles_to_quat(np.array([55, 0, -45]), degrees=True)
 
-    camera_side = camera_cfg.replace()
-    camera_side.prim_path = "{ENV_REGEX_NS}/CameraSide"
-    camera_side.offset.pos = (0.75, -0.75, 0.75)
-    camera_side.offset.rot = euler_angles_to_quat(np.array([55, 0, -45]), degrees=True)
-
-    camera_ego = camera_cfg.replace()
-    # Keep this camera outside the robot articulation subtree.  A camera under
-    # Robot/gripper/gripper_cam can initialize stale until the USD tree is dirtied.
-    camera_ego.prim_path = "{ENV_REGEX_NS}/GripperCamera"
-    camera_ego.spawn.focus_distance = 0.05
-    camera_ego.offset.pos = GRIPPER_CAMERA_POS
-    camera_ego.offset.rot = euler_angles_to_quat(np.array(GRIPPER_CAMERA_ROT_DEG), degrees=True)
-
-    camera_iphone = camera_cfg.replace()
-    camera_iphone.prim_path = "{ENV_REGEX_NS}/iphoneCam"
-    camera_iphone.spawn.focus_distance = 0.05
-    camera_iphone.offset.pos = IPHONE_CAMERA_POS
-    camera_iphone.offset.rot = euler_angles_to_quat(np.array(IPHONE_CAMERA_ROT_DEG), degrees=True)
+    gripper_cam = camera_cfg.replace()
+    gripper_cam.prim_path = "{ENV_REGEX_NS}/GripperCamera"
+    gripper_cam.width = 320
+    gripper_cam.height = 240
+    gripper_cam.spawn.focus_distance = 0.05
+    gripper_cam.offset.pos = GRIPPER_CAMERA_POS
+    gripper_cam.offset.rot = euler_angles_to_quat(np.array(GRIPPER_CAMERA_ROT_DEG), degrees=True)
 
     ground = AssetBaseCfg(
         prim_path="/World/Ground",
@@ -226,12 +243,27 @@ class ActionsCfg:
 
 @configclass
 class EventCfg:
+    startup_refresh_camera_xforms = EventTerm(
+        func=refresh_config_cameras,
+        mode="startup",
+        params={
+            "camera_names": ["env_cam"],
+        },
+    )
+
     refresh_camera_xforms = EventTerm(
         func=refresh_config_cameras,
         mode="reset",
         params={
-            "camera_names": ["camera_ego", "camera_iphone"],
+            "camera_names": ["env_cam"],
         },
+    )
+
+    sync_gripper_camera = EventTerm(
+        func=sync_gripper_camera_to_frame,
+        mode="interval",
+        interval_range_s=(0.0, 0.0),
+        is_global_time=True,
     )
 
     reset_robot_position = EventTerm(
@@ -252,6 +284,11 @@ class EventCfg:
             "position_range": (0, 0),
             "velocity_range": (0, 0),
         },
+    )
+
+    reset_sync_gripper_camera = EventTerm(
+        func=sync_gripper_camera_to_frame,
+        mode="reset",
     )
 
     set_robot_white = EventTerm(
@@ -307,37 +344,19 @@ class ObservationsCfg:
 
     @configclass
     class VisualCfg(ObsGroup):
-        rgb_ego = ObsTerm(
+        rgb_env = ObsTerm(
             func=image,
             params={
-                "sensor_cfg": SceneEntityCfg("camera_ego"),
+                "sensor_cfg": SceneEntityCfg("env_cam"),
                 "data_type": "rgb",
                 "normalize": False,
             },
         )
 
-        rgb_top = ObsTerm(
+        rgb_gripper = ObsTerm(
             func=image,
             params={
-                "sensor_cfg": SceneEntityCfg("camera_top"),
-                "data_type": "rgb",
-                "normalize": False,
-            },
-        )
-
-        rgb_side = ObsTerm(
-            func=image,
-            params={
-                "sensor_cfg": SceneEntityCfg("camera_side"),
-                "data_type": "rgb",
-                "normalize": False,
-            },
-        )
-
-        rgb_iphone = ObsTerm(
-            func=image,
-            params={
-                "sensor_cfg": SceneEntityCfg("camera_iphone"),
+                "sensor_cfg": SceneEntityCfg("gripper_cam"),
                 "data_type": "rgb",
                 "normalize": False,
             },
