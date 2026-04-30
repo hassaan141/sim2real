@@ -16,6 +16,16 @@ from isaaclab.sensors import FrameTransformer
 _BANANA_LONG_AXIS_LOCAL = (1.0, 0.0, 0.0)
 
 
+def _safe(x: torch.Tensor, clamp: float = 100.0) -> torch.Tensor:
+    """Replace NaN/inf with zeros and clamp to a finite range.
+
+    A single env producing NaN observations (rare physics divergence at hard
+    contact, e.g. gripper clamping the banana) otherwise poisons the critic
+    via NaN gradients and crashes training many iterations later.
+    """
+    return torch.nan_to_num(x, nan=0.0, posinf=clamp, neginf=-clamp).clamp(-clamp, clamp)
+
+
 def rel_ee_to_banana(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
@@ -27,7 +37,7 @@ def rel_ee_to_banana(
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     ee_pos = ee_frame.data.target_pos_w[:, 0, :]
     banana_pos = env.scene["banana"].data.root_pos_w
-    return banana_pos - ee_pos
+    return _safe(banana_pos - ee_pos)
 
 
 def ee_pos_rel_env(
@@ -36,7 +46,7 @@ def ee_pos_rel_env(
 ) -> torch.Tensor:
     """Gripper (EE) position relative to the environment origin. Shape: (num_envs, 3)."""
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    return ee_frame.data.target_pos_w[:, 0, :] - env.scene.env_origins
+    return _safe(ee_frame.data.target_pos_w[:, 0, :] - env.scene.env_origins)
 
 
 def banana_long_axis(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -50,7 +60,7 @@ def banana_long_axis(env: ManagerBasedRLEnv) -> torch.Tensor:
     local = torch.tensor(
         [_BANANA_LONG_AXIS_LOCAL], device=env.device, dtype=torch.float32
     ).expand(env.num_envs, -1)
-    return math_utils.quat_apply(banana_quat, local)
+    return _safe(math_utils.quat_apply(banana_quat, local))
 
 
 def gripper_opening(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -61,4 +71,4 @@ def gripper_opening(env: ManagerBasedRLEnv) -> torch.Tensor:
     """
     robot = env.scene["robot"]
     ids, _ = robot.find_joints("gripper")
-    return robot.data.joint_pos[:, ids]
+    return _safe(robot.data.joint_pos[:, ids])

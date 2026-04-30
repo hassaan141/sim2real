@@ -129,11 +129,48 @@ VISUAL_RANDOMIZATION_GROUPS = {
     ],
 }
 
-VISUAL_RANDOMIZATION_COLOR_RANGES = {
-    "table": ((0.01, 0.01, 0.01), (0.25, 0.25, 0.25)),
-    "floor": ((0.35, 0.35, 0.32), (0.75, 0.75, 0.72)),
-    "walls": ((0.65, 0.65, 0.62), (0.98, 0.98, 0.94)),
-    "cup": ((0.02, 0.12, 0.35), (0.15, 0.45, 1.0)),
+VISUAL_RANDOMIZATION_COLOR_PALETTES = {
+    "table": [
+        (0.04, 0.04, 0.04),  # black laminate
+        (0.42, 0.25, 0.13),  # brown wood
+        (0.58, 0.34, 0.18),  # warm tabletop
+        (0.52, 0.30, 0.20),  # reddish wood
+        (0.70, 0.55, 0.36),  # light plywood
+    ],
+    "floor": [
+        (0.38, 0.38, 0.36),
+        (0.58, 0.55, 0.50),
+        (0.72, 0.68, 0.60),
+        (0.50, 0.46, 0.40),
+    ],
+    "walls": [
+        (0.92, 0.90, 0.84),
+        (0.72, 0.69, 0.62),
+        (0.48, 0.35, 0.72),  # purple sim backdrop
+        (0.58, 0.68, 0.72),
+        (0.64, 0.72, 0.58),
+    ],
+    "cup": [
+        (0.05, 0.22, 0.85),
+        (0.85, 0.10, 0.06),
+        (0.05, 0.45, 0.18),
+        (0.90, 0.78, 0.10),
+        (0.92, 0.92, 0.84),
+    ],
+}
+
+VISUAL_RANDOMIZATION_COLOR_JITTER = {
+    "table": 0.05,
+    "floor": 0.06,
+    "walls": 0.08,
+    "cup": 0.04,
+}
+
+VISUAL_RANDOMIZATION_MATERIAL_RANGES = {
+    "table": {"roughness": (0.35, 0.95), "metallic": (0.0, 0.02)},
+    "floor": {"roughness": (0.45, 1.0), "metallic": (0.0, 0.0)},
+    "walls": {"roughness": (0.55, 1.0), "metallic": (0.0, 0.0)},
+    "cup": {"roughness": (0.25, 0.85), "metallic": (0.0, 0.04)},
 }
 
 
@@ -279,38 +316,57 @@ def randomize_banana_on_table_dr(
     banana.write_root_velocity_to_sim(zero_velocity, env_ids=env_ids)
 
 
-def _sample_color(color_range):
-    low, high = color_range
-    return tuple(
-        torch.empty(1, device="cpu").uniform_(low[i], high[i]).item()
-        for i in range(3)
-    )
+def _sample_palette_color(group_name):
+    palette = VISUAL_RANDOMIZATION_COLOR_PALETTES[group_name]
+    base_color = palette[torch.randint(0, len(palette), (1,), device="cpu").item()]
+    jitter = VISUAL_RANDOMIZATION_COLOR_JITTER[group_name]
+    channels = []
+    for channel in base_color:
+        value = channel + torch.empty(1, device="cpu").uniform_(-jitter, jitter).item()
+        channels.append(max(0.0, min(1.0, value)))
+    return tuple(channels)
 
 
-def _set_asset_color(env, asset_name, color):
+def _sample_range(value_range):
+    return torch.empty(1, device="cpu").uniform_(*value_range).item()
+
+
+def _set_asset_material(env, asset_name, color, material_ranges):
     asset = env.scene[asset_name]
     prim_path = asset.prim_paths[0]
     material_path = f"{prim_path}/Looks/visualMaterial/Shader"
     prims = sim_utils.find_matching_prims(material_path)
     if not prims:
         return
-    attr = prims[0].GetAttribute("inputs:diffuse_color_constant")
-    if attr.IsValid():
-        attr.Set(color)
+    shader = prims[0]
+    diffuse_attr = shader.GetAttribute("inputs:diffuse_color_constant")
+    roughness_attr = shader.GetAttribute("inputs:roughness")
+    metallic_attr = shader.GetAttribute("inputs:metallic")
+    if diffuse_attr.IsValid():
+        diffuse_attr.Set(color)
+    if roughness_attr.IsValid() and "roughness" in material_ranges:
+        roughness_attr.Set(float(_sample_range(material_ranges["roughness"])))
+    if metallic_attr.IsValid() and "metallic" in material_ranges:
+        metallic_attr.Set(float(_sample_range(material_ranges["metallic"])))
 
 
 def randomize_scene_visuals(env, env_ids):
-    """Randomize simple USD material colors and dome light appearance."""
+    """Randomize USD materials and dome light to create visible sim-to-real variation."""
     with Sdf.ChangeBlock():
         for group_name, asset_names in VISUAL_RANDOMIZATION_GROUPS.items():
-            color = _sample_color(VISUAL_RANDOMIZATION_COLOR_RANGES[group_name])
+            color = _sample_palette_color(group_name)
+            material_ranges = VISUAL_RANDOMIZATION_MATERIAL_RANGES[group_name]
             for asset_name in asset_names:
-                _set_asset_color(env, asset_name, color)
+                _set_asset_material(env, asset_name, color, material_ranges)
 
         light_prim = get_current_stage().GetPrimAtPath("/World/Light")
         if light_prim.IsValid():
-            intensity = torch.empty(1, device="cpu").uniform_(1800.0, 4200.0).item()
-            color = _sample_color(((0.75, 0.75, 0.70), (1.0, 1.0, 1.0)))
+            intensity = _sample_range((1200.0, 5200.0))
+            color = (
+                _sample_range((0.70, 1.0)),
+                _sample_range((0.70, 1.0)),
+                _sample_range((0.65, 1.0)),
+            )
             intensity_attr = light_prim.GetAttribute("inputs:intensity")
             color_attr = light_prim.GetAttribute("inputs:color")
             if intensity_attr.IsValid():

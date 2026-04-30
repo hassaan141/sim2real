@@ -93,7 +93,7 @@ class ActionsCfg:
             "elbow_flex": 0.15,
             "wrist_flex": 0.15,
             "wrist_roll": 0.15,
-            "gripper": 1.4,
+            "gripper": 0.8,
         },
         use_default_offset=True,
     )

@@ -47,7 +47,7 @@ def _ee_banana_distance_and_alignment(
     ee_pos = ee_frame.data.target_pos_w[:, 0, :]
     banana_pos = env.scene["banana"].data.root_pos_w
 
-    dist = torch.norm(banana_pos - ee_pos, dim=-1)
+    dist = torch.nan_to_num(torch.norm(banana_pos - ee_pos, dim=-1), nan=1.0, posinf=1.0)
 
     banana_quat = env.scene["banana"].data.root_quat_w
     long_local = torch.tensor(
@@ -64,7 +64,7 @@ def _ee_banana_distance_and_alignment(
     gripper_close = gripper_close / (gripper_close.norm(dim=-1, keepdim=True) + 1e-6)
 
     cos_angle = torch.abs((banana_long * gripper_close).sum(dim=-1))
-    perp_score = 1.0 - cos_angle
+    perp_score = torch.nan_to_num(1.0 - cos_angle, nan=0.0)
     return dist, perp_score
 
 
