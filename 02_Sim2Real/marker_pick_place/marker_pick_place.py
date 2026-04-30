@@ -19,6 +19,9 @@ parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--seed", type=int, default=101)
 parser.add_argument("--debug-control", action="store_true", default=False)
 parser.add_argument("--debug-control-interval", type=int, default=30)
+parser.add_argument("--repo-id", type=str, default="local/banana_pick")
+parser.add_argument("--repo-root", type=str, default="datasets/banana_pick_lerobot")
+parser.add_argument("--task-name", type=str, default="pick up the banana and place it in the cup")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -32,11 +35,17 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.sim import get_current_stage
 from pxr import Usd, UsdPhysics, UsdShade
+import carb
+import omni.appwindow
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 import marker_pick_place.tasks  # noqa: F401
-from marker_pick_place.tasks.marker_env_cfg import refresh_config_cameras, sync_gripper_camera_to_frame
+from marker_pick_place.tasks.marker_env_cfg import (
+    refresh_config_cameras,
+    sync_env_camera_to_world,
+    sync_gripper_camera_to_frame,
+)
 
 
 JOINT_NAMES = [
@@ -48,6 +57,98 @@ JOINT_NAMES = [
     "gripper",
 ]
 CAMERA_SENSOR_NAMES = ["env_cam", "gripper_cam"]
+REPLICATOR_DR_EVENT = "marker_pick_place_visual_domain_randomization"
+
+
+class TeleopHotkeys:
+    """Collect key presses from the Isaac Sim viewport."""
+
+    def __init__(self) -> None:
+        self.start_recording = False
+        self.stop_recording = False
+        self.reset_env = False
+        self._input = carb.input.acquire_input_interface()
+        self._keyboard = omni.appwindow.get_default_app_window().get_keyboard()
+        self._sub = self._input.subscribe_to_keyboard_events(
+            self._keyboard,
+            self._on_keyboard_event,
+        )
+
+    def _on_keyboard_event(self, event) -> bool:
+        if event.type != carb.input.KeyboardEventType.KEY_PRESS:
+            return True
+        if event.input == carb.input.KeyboardInput.R:
+            self.start_recording = True
+        elif event.input == carb.input.KeyboardInput.Y:
+            self.stop_recording = True
+        elif event.input == carb.input.KeyboardInput.T:
+            self.reset_env = True
+        return True
+
+
+class ReplicatorDomainRandomizer:
+    """Visual domain randomization driven by an explicit Replicator event."""
+
+    def __init__(self, seed: int) -> None:
+        self.seed = seed
+        self.rep = None
+        self.enabled = False
+
+    def setup(self) -> None:
+        try:
+            import omni.replicator.core as rep
+        except Exception as exc:
+            print(f"[WARN]: Replicator unavailable; visual domain randomization disabled: {exc}")
+            return
+
+        self.rep = rep
+        try:
+            if hasattr(rep, "set_global_seed"):
+                rep.set_global_seed(self.seed)
+
+            def randomize_materials(path_pattern, color_min, color_max):
+                prims = rep.get.prims(path_pattern=path_pattern)
+                mats = rep.create.material_omnipbr(
+                    diffuse=rep.distribution.uniform(color_min, color_max),
+                    roughness=rep.distribution.uniform(0.35, 0.95),
+                    metallic=rep.distribution.choice([0.0, 0.0, 0.05]),
+                    count=32,
+                )
+                with prims:
+                    rep.randomizer.materials(mats)
+                return prims.node
+
+            rep.randomizer.register(randomize_materials, override=True)
+            with rep.trigger.on_custom_event(event_name=REPLICATOR_DR_EVENT):
+                rep.randomizer.randomize_materials(
+                    r"/World/envs/env_.*/(Cup.*|Table.*|Floor|.*Wall.*|.*Baseboard.*|EnvCamMount)",
+                    (0.15, 0.15, 0.15),
+                    (0.95, 0.95, 0.95),
+                )
+                rep.create.light(
+                    light_type="Sphere",
+                    count=2,
+                    position=rep.distribution.uniform((-0.7, -1.0, 0.8), (0.8, 0.8, 1.8)),
+                    color=rep.distribution.uniform((0.75, 0.75, 0.70), (1.0, 1.0, 1.0)),
+                    intensity=rep.distribution.uniform(200.0, 1200.0),
+                    scale=rep.distribution.uniform(0.15, 0.45),
+                )
+        except Exception as exc:
+            print(f"[WARN]: Replicator setup failed; visual domain randomization disabled: {exc}")
+            self.rep = None
+            return
+
+        self.enabled = True
+        print("[INFO]: Replicator visual domain randomization enabled")
+
+    def randomize(self) -> None:
+        if not self.enabled or self.rep is None:
+            return
+        try:
+            self.rep.utils.send_og_event(event_name=REPLICATOR_DR_EVENT)
+            self.rep.orchestrator.step(rt_subframes=2)
+        except Exception as exc:
+            print(f"[WARN]: Replicator randomization failed: {exc}")
 
 
 def _print_robot_actuator_config(env) -> None:
@@ -153,7 +254,10 @@ def _disable_camera_pipeline(env_cfg) -> None:
     env_cfg.scene.env_cam = None
     env_cfg.scene.gripper_cam = None
     env_cfg.events.startup_refresh_camera_xforms = None
+    env_cfg.events.startup_sync_env_camera = None
     env_cfg.events.refresh_camera_xforms = None
+    env_cfg.events.sync_env_camera = None
+    env_cfg.events.reset_sync_env_camera = None
     env_cfg.events.reset_sync_gripper_camera = None
     env_cfg.events.sync_gripper_camera = None
 
@@ -169,13 +273,16 @@ def _warmup_render(steps: int = 12) -> None:
         sim.render()
 
 
-def _force_camera_refresh(env, cycles: int = 2) -> None:
+def _force_camera_refresh(env, cycles: int = 3) -> None:
     sim = sim_utils.SimulationContext.instance()
     for _ in range(cycles):
         refresh_config_cameras(env.unwrapped, None, ["env_cam"])
+        sync_env_camera_to_world(env.unwrapped, None)
         sync_gripper_camera_to_frame(env.unwrapped, None)
+
         if sim is not None:
             sim.render()
+
         for name in CAMERA_SENSOR_NAMES:
             if name in env.unwrapped.scene.keys():
                 env.unwrapped.scene[name].update(0.0, force_recompute=True)
@@ -240,6 +347,7 @@ def _make_env():
         _force_camera_refresh(env)
         _rebind_viewport_cameras(env)
         _warmup_render()
+
     return env, joint_indices
 
 
@@ -264,45 +372,83 @@ def _run_teleop(env, joint_indices: torch.Tensor) -> None:
     leader.connect()
 
     recorder = TeleopDatasetRecorder(
-        RecorderConfig(output_root="recordings", fps=30),
+        RecorderConfig(
+            repo_id=args_cli.repo_id,
+            dataset_root=args_cli.repo_root,
+            task_name=args_cli.task_name,
+            fps=30,
+        ),
         cameras=cameras,
         device=env.unwrapped.device,
     )
-    if args_cli.record:
-        recorder.start()
+    hotkeys = TeleopHotkeys()
 
     actions = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
 
-    print("[INFO]: Teleop running. Close the app to stop.")
+    print("[INFO]: Teleop running with cameras/dataset recording.")
+    print("[INFO]: Commands:")
+    print("[INFO]:   R - start recording")
+    print("[INFO]:   Y - stop and save recording")
+    print("[INFO]:   T - reset env and randomize domain with Isaac Lab events")
+    print("[INFO]:   Close Isaac Sim - exit teleop")
+    if args_cli.record:
+        print("[INFO]: Recording armed. Press R to start.")
     step_count = 0
-    while simulation_app.is_running():
-        with torch.inference_mode():
-            sample = leader.read_sample()
-            actions[0] = sample.target_rad
-            obs, _, _, _, _ = env.step(actions)
-            step_count += 1
+    try:
+        while simulation_app.is_running():
+            with torch.inference_mode():
+                if hotkeys.start_recording:
+                    hotkeys.start_recording = False
+                    if recorder.enabled:
+                        print("[INFO]: Recording is already running")
+                    else:
+                        recorder.start()
 
-            if (
-                args_cli.debug_control
-                and step_count % max(args_cli.debug_control_interval, 1) == 0
-            ):
-                robot = env.unwrapped.scene["robot"]
-                joint_pos = robot.data.joint_pos[0, joint_indices]
-                joint_vel = robot.data.joint_vel[0, joint_indices]
-                _print_control_debug(
-                    step_count,
-                    sample,
-                    actions[0],
-                    joint_pos,
-                    joint_vel,
-                )
+                if hotkeys.stop_recording:
+                    hotkeys.stop_recording = False
+                    if recorder.enabled:
+                        recorder.stop()
+                    else:
+                        print("[INFO]: Recording is not running")
 
-            if recorder.enabled:
-                joint_pos = obs["policy"]["joint_pos_obs"][0]
-                recorder.push(actions[0], joint_pos, obs.get("visual", {}))
+                if hotkeys.reset_env:
+                    hotkeys.reset_env = False
+                    env.reset()
+                    if args_cli.enable_cameras:
+                        _force_camera_refresh(env)
+                    actions.zero_()
+                    print("[INFO]: Environment reset")
 
-    if recorder.enabled:
-        recorder.stop()
+                sample = leader.read_sample()
+                actions[0] = sample.target_rad
+                obs, _, _, _, _ = env.step(actions)
+                step_count += 1
+
+                if (
+                    args_cli.debug_control
+                    and step_count % max(args_cli.debug_control_interval, 1) == 0
+                ):
+                    robot = env.unwrapped.scene["robot"]
+                    joint_pos = robot.data.joint_pos[0, joint_indices]
+                    joint_vel = robot.data.joint_vel[0, joint_indices]
+                    _print_control_debug(
+                        step_count,
+                        sample,
+                        actions[0],
+                        joint_pos,
+                        joint_vel,
+                    )
+
+                if recorder.enabled:
+                    joint_pos = obs["policy"]["joint_pos_obs"][0]
+                    recorder.push(
+                        sample.raw_deg,
+                        leader.sim_radians_to_raw_deg(joint_pos),
+                        obs.get("visual", {}),
+                    )
+    finally:
+        if recorder.enabled:
+            recorder.stop()
 
 
 def main() -> None:

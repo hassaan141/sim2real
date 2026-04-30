@@ -101,6 +101,14 @@ class SO100LeaderTeleop:
         mapped_rad = mapped_deg * torch.pi / 180.0
         return mapped_rad * self._joint_target_signs
 
+    def sim_radians_to_raw_deg(self, joint_pos_rad: torch.Tensor) -> torch.Tensor:
+        mapped_deg = joint_pos_rad / self._joint_target_signs * 180.0 / torch.pi
+        normalized = (mapped_deg - self._joint_mins) / (self._joint_maxs - self._joint_mins)
+        raw_deg = torch.zeros_like(normalized)
+        raw_deg[:-1] = normalized[:-1] * 200.0 - 100.0
+        raw_deg[-1] = normalized[-1] * 100.0
+        return raw_deg
+
     def read_sample(self) -> SO100LeaderSample:
         if self._robot is None:
             raise RuntimeError("Leader robot not connected. Call connect() first.")

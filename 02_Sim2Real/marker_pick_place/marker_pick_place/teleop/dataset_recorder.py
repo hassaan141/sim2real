@@ -1,66 +1,111 @@
 import os
 from dataclasses import dataclass
-from datetime import datetime
 
-import numpy as np
 import torch
+
+
+JOINT_FEATURE_NAMES = [
+    "shoulder_pan.pos",
+    "shoulder_lift.pos",
+    "elbow_flex.pos",
+    "wrist_flex.pos",
+    "wrist_roll.pos",
+    "gripper.pos",
+]
 
 
 @dataclass
 class RecorderConfig:
-    output_root: str = "recordings"
+    repo_id: str = "local/banana_pick"
+    dataset_root: str = "datasets/banana_pick_lerobot"
+    task_name: str = "pick up the banana and place it in the cup"
     fps: int = 30
+    robot_type: str = "so101_follower"
 
 
 class TeleopDatasetRecorder:
-    """Lightweight recorder for teleop data.
-
-    Stores joint positions and RGB frames to a torch file per session.
-    """
+    """LeRobot-backed recorder for teleop episodes."""
 
     def __init__(self, config: RecorderConfig, cameras: dict, device: str) -> None:
         self.config = config
         self.cameras = cameras
         self.device = device
         self._enabled = False
-        self._frames = []
-        self._output_dir = None
+        self._dataset = None
+
+    def _features(self) -> dict:
+        features = {
+            "observation.state": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": JOINT_FEATURE_NAMES,
+                "fps": self.config.fps,
+            },
+            "action": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": JOINT_FEATURE_NAMES,
+                "fps": self.config.fps,
+            },
+        }
+        for camera_name, camera in self.cameras.items():
+            features[f"observation.images.{camera_name}"] = {
+                "dtype": "video",
+                "shape": (camera["height"], camera["width"], 3),
+                "names": ["height", "width", "channels"],
+            }
+        return features
+
+    def _init_dataset(self) -> None:
+        if self._dataset is not None:
+            return
+
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+        if os.path.exists(self.config.dataset_root):
+            self._dataset = LeRobotDataset(self.config.repo_id, root=self.config.dataset_root)
+            print(f"[INFO]: Existing LeRobot dataset initialized: {self.config.dataset_root}")
+            return
+
+        self._dataset = LeRobotDataset.create(
+            self.config.repo_id,
+            fps=self.config.fps,
+            features=self._features(),
+            root=self.config.dataset_root,
+            robot_type=self.config.robot_type,
+        )
+        print(f"[INFO]: New LeRobot dataset initialized: {self.config.dataset_root}")
 
     def start(self) -> None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._output_dir = os.path.join(self.config.output_root, f"teleop_{timestamp}")
-        os.makedirs(self._output_dir, exist_ok=True)
+        self._init_dataset()
         self._enabled = True
-        self._frames = []
-        print(f"[INFO]: Recording teleop dataset to {self._output_dir}")
+        print(f"[INFO]: Started LeRobot episode recording to {self.config.dataset_root}")
 
     def stop(self) -> None:
         if not self._enabled:
             return
-        data = {
-            "fps": self.config.fps,
-            "frames": self._frames,
-            "cameras": self.cameras,
-        }
-        torch.save(data, os.path.join(self._output_dir, "teleop_dataset.pt"))
+        self._dataset.save_episode()
+        self._dataset.finalize()
+        self._dataset = None
         self._enabled = False
-        print("[INFO]: Teleop dataset saved")
+        print(f"[INFO]: LeRobot episode saved to {self.config.dataset_root}")
 
     def push(self, action: torch.Tensor, joint_pos: torch.Tensor, visual_obs: dict) -> None:
         if not self._enabled:
             return
+
         frame = {
-            "action": action.detach().cpu(),
-            "joint_pos": joint_pos.detach().cpu(),
-            "images": {},
+            "action": action.detach().cpu().numpy().astype("float32"),
+            "observation.state": joint_pos.detach().cpu().numpy().astype("float32"),
+            "task": self.config.task_name,
         }
         for camera_name in self.cameras.keys():
             rgb_key = f"rgb_{camera_name}"
             if rgb_key in visual_obs:
-                frame["images"][camera_name] = (
-                    visual_obs[rgb_key][0].detach().cpu().to(torch.uint8)
+                frame[f"observation.images.{camera_name}"] = (
+                    visual_obs[rgb_key][0].detach().cpu().to(torch.uint8).numpy()
                 )
-        self._frames.append(frame)
+        self._dataset.add_frame(frame)
 
     @property
     def enabled(self) -> bool:

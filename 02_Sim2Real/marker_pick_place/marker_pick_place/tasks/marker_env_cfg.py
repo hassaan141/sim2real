@@ -11,7 +11,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import CameraCfg, FrameTransformerCfg
 import isaaclab.utils.math as math_utils
 from isaacsim.core.utils.rotations import euler_angles_to_quat
-from marker_pick_place.mdp import randomize_robot_color, reset_joints_by_offset
+from marker_pick_place.mdp import random_asset_pose, randomize_robot_color, reset_joints_by_offset
 from isaaclab.sim import get_current_stage
 from pxr import Gf, Sdf, UsdGeom
 
@@ -68,8 +68,8 @@ camera_cfg = CameraCfg(
     data_types=["rgb"],
     spawn=sim_utils.PinholeCameraCfg(
         projection_type="pinhole",
-        f_stop=100,
         focal_length=13.5,
+        f_stop=100.0,
         focus_distance=0.05,
     ),
     offset=CameraCfg.OffsetCfg(
@@ -82,11 +82,15 @@ camera_cfg = CameraCfg(
 # Gripper-local camera pose.
 # Position comes from: inv(T_world_gripper) * T_world_camera.
 # Rotation is a direct wxyz quaternion. Do not convert this through Euler degrees.
-GRIPPER_CAMERA_POS = (0.02660, 0.01421, -0.09602)
+GRIPPER_CAMERA_POS = (0.02660, -0.00600, -0.12000)
 
 # This rotation points the camera optical axis back toward the gripper pose.
 # Quaternion convention: w, x, y, z.
 GRIPPER_CAMERA_ROT = (-0.15123, 0.40528, -0.90154, -0.01034)
+
+ENV_CAMERA_POS = (0.33404, -0.66566, 0.98601)
+ENV_CAMERA_ROT_DEG = (45.659, 24.07, 20.477)
+ENV_CAMERA_ROT = tuple(euler_angles_to_quat(np.array(ENV_CAMERA_ROT_DEG), degrees=True))
 
 
 def _xform_attr(prim, attr_name, add_op):
@@ -94,6 +98,12 @@ def _xform_attr(prim, attr_name, add_op):
     if attr.IsValid():
         return attr
     return add_op(UsdGeom.Xformable(prim)).GetAttr()
+
+
+def _force_camera_usd_pose_writes(camera):
+    """Camera render products consume USD-authored transforms more reliably than Fabric writes."""
+    if hasattr(camera, "_view"):
+        camera._view._use_fabric = False
 
 
 def refresh_config_cameras(env, env_ids, camera_names=None):
@@ -105,8 +115,9 @@ def refresh_config_cameras(env, env_ids, camera_names=None):
     camera_updates = []
     for name in camera_names:
         camera = env.scene[name]
-        prim_path_pattern = camera.cfg.prim_path.replace("{ENV_REGEX_NS}", "/World/envs/env_.*")
-        for prim in sim_utils.find_matching_prims(prim_path_pattern):
+        for env_idx in range(env.num_envs):
+            prim_path = camera.cfg.prim_path.replace("{ENV_REGEX_NS}", f"/World/envs/env_{env_idx}")
+            prim = stage.GetPrimAtPath(prim_path)
             if prim.IsValid():
                 camera_updates.append((prim, camera.cfg.offset.pos, camera.cfg.offset.rot))
 
@@ -131,6 +142,7 @@ def sync_gripper_camera_to_frame(
 ):
     """Keep the external gripper camera riding on the gripper frame."""
     camera = env.scene[camera_cfg.name]
+    _force_camera_usd_pose_writes(camera)
     ee_frame = env.scene[ee_frame_cfg.name]
     gripper_pos = ee_frame.data.target_pos_w[:, 0, :]
     gripper_quat = ee_frame.data.target_quat_w[:, 0, :]
@@ -143,6 +155,63 @@ def sync_gripper_camera_to_frame(
         offset_quat,
     )
     camera.set_world_poses(camera_pos.to(dtype=torch.float32), camera_quat.to(dtype=torch.float32), convention="opengl")
+
+
+def sync_env_camera_to_world(
+    env,
+    env_ids,
+    camera_cfg=SceneEntityCfg("env_cam"),
+):
+    """Keep the env camera authored at its configured world pose."""
+    camera = env.scene[camera_cfg.name]
+    _force_camera_usd_pose_writes(camera)
+    env_camera_pos = torch.tensor(ENV_CAMERA_POS, device=env.device, dtype=torch.float32).repeat(env.num_envs, 1)
+    env_camera_pos = env_camera_pos + env.scene.env_origins
+    env_camera_quat = torch.tensor(
+        euler_angles_to_quat(np.array(ENV_CAMERA_ROT_DEG), degrees=True),
+        device=env.device,
+        dtype=torch.float32,
+    ).repeat(env.num_envs, 1)
+    camera.set_world_poses(
+        env_camera_pos,
+        env_camera_quat,
+        convention="opengl",
+    )
+
+
+def randomize_banana_on_table(
+    env,
+    env_ids,
+    asset_cfg=SceneEntityCfg("banana"),
+):
+    """Place the banana on the tabletop while keeping it out of the cup."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+
+    banana = env.scene[asset_cfg.name]
+    root_states = banana.data.default_root_state[env_ids].clone()
+    positions = root_states[:, 0:3] + env.scene.env_origins[env_ids]
+
+    x = torch.empty(len(env_ids), device=banana.device).uniform_(0.06, 0.17)
+    y_abs = torch.empty(len(env_ids), device=banana.device).uniform_(0.08, 0.20)
+    y_sign = torch.where(
+        torch.rand(len(env_ids), device=banana.device) < 0.5,
+        -torch.ones(len(env_ids), device=banana.device),
+        torch.ones(len(env_ids), device=banana.device),
+    )
+    positions[:, 0] = x
+    positions[:, 1] = y_abs * y_sign
+    positions[:, 2] = 0.485
+
+    yaw = torch.empty(len(env_ids), device=banana.device).uniform_(-0.8, 0.8)
+    roll = torch.zeros_like(yaw)
+    pitch = torch.zeros_like(yaw)
+    orientations_delta = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+    orientations = math_utils.quat_mul(root_states[:, 3:7], orientations_delta)
+
+    banana.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    zero_velocity = torch.zeros((len(env_ids), 6), device=banana.device)
+    banana.write_root_velocity_to_sim(zero_velocity, env_ids=env_ids)
 
 
 @configclass
@@ -167,16 +236,27 @@ class MarkerSceneCfg(InteractiveSceneCfg):
         ],
     )
 
+    env_cam_mount = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/EnvCamMount",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.02, 0.02, 0.02),
+        ),
+        init_state=AssetBaseCfg.InitialStateCfg(
+            pos=ENV_CAMERA_POS,
+            rot=ENV_CAMERA_ROT,
+        ),
+    )
+
     env_cam = camera_cfg.replace()
-    env_cam.prim_path = "{ENV_REGEX_NS}/EnvCam"
-    env_cam.offset.pos = (-0.55, -0.75, 0.75)
-    env_cam.offset.rot = euler_angles_to_quat(np.array([55, 0, -45]), degrees=True)
+    env_cam.prim_path = "{ENV_REGEX_NS}/EnvCamMount/EnvCam"
+    env_cam.offset.pos = (0.0, 0.0, 0.0)
+    env_cam.offset.rot = (1.0, 0.0, 0.0, 0.0)
 
     gripper_cam = camera_cfg.replace()
     gripper_cam.prim_path = "{ENV_REGEX_NS}/GripperCamera"
-    gripper_cam.width = 320
-    gripper_cam.height = 240
-    gripper_cam.spawn.focus_distance = 0.05
+    gripper_cam.width = 640
+    gripper_cam.height = 360
+    gripper_cam.spawn.focus_distance = 0.5
     gripper_cam.offset.pos = GRIPPER_CAMERA_POS
     gripper_cam.offset.rot = GRIPPER_CAMERA_ROT
 
@@ -255,6 +335,11 @@ class EventCfg:
         },
     )
 
+    startup_sync_env_camera = EventTerm(
+        func=sync_env_camera_to_world,
+        mode="startup",
+    )
+
     refresh_camera_xforms = EventTerm(
         func=refresh_config_cameras,
         mode="reset",
@@ -262,6 +347,8 @@ class EventCfg:
             "camera_names": ["env_cam"],
         },
     )
+
+    sync_env_camera = None
 
     sync_gripper_camera = EventTerm(
         func=sync_gripper_camera_to_frame,
@@ -285,8 +372,16 @@ class EventCfg:
                     "gripper",
                 ],
             ),
-            "position_range": (0, 0),
+            "position_range": (-0.04, 0.04),
             "velocity_range": (0, 0),
+        },
+    )
+
+    randomize_banana_pose = EventTerm(
+        func=randomize_banana_on_table,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("banana"),
         },
     )
 
@@ -295,11 +390,16 @@ class EventCfg:
         mode="reset",
     )
 
-    set_robot_white = EventTerm(
+    reset_sync_env_camera = EventTerm(
+        func=sync_env_camera_to_world,
+        mode="reset",
+    )
+
+    randomize_robot_appearance = EventTerm(
         func=randomize_robot_color,
         mode="reset",
         params={
-            "color_names": ["white"],
+            "color_names": ["orange", "teal", "white", "black"],
         },
     )
 
@@ -394,6 +494,8 @@ class MarkerTeleopEnvCfg(ManagerBasedRLEnvCfg):
 
         self.sim.dt = 1 / 120
         self.sim.render_interval = self.decimation
+        self.num_rerenders_on_reset = 3
+        self.image_obs_list = ["env_cam", "gripper_cam"]
         self.sim.physx.enable_ccd = True
         self.sim.physx.enable_stabilization = True
 

@@ -93,3 +93,42 @@ The key pieces to copy conceptually are:
 - `Se3AbsRetargeterCfg` or `Se3RelRetargeterCfg`
 - `GripperRetargeterCfg`
 - the task action space expected by `teleop_se3_agent.py`
+
+## Quest2ROS2 SO100 IK teleop
+
+This folder now has a local copy of the SO100 marker pick-place task from
+`02_Sim2Real/marker_pick_place` under `so100_marker_pick_place/`, with assets
+copied to `03_VR_XR/assets/`.
+
+Build the small ROS2 message package for Quest controller inputs:
+
+```bash
+03_VR_XR/build_quest2ros2_msgs.sh
+export QUEST2ROS2_WS=03_VR_XR/quest2ros2_ws
+```
+
+Run Quest controller pose teleop:
+
+```bash
+03_VR_XR/run_quest2_so100_ik_teleop.sh
+```
+
+Controls:
+
+- Hold the right controller lower button to move the SO100 end effector.
+- Press the right controller upper button to reset the controller-to-robot anchor.
+- Right index trigger closes the gripper.
+
+If you want to test through the existing ROS2 real-arm bridge topic instead of
+Quest controller pose:
+
+```bash
+SOURCE=cmd_pose 03_VR_XR/run_quest2_so100_ik_teleop.sh --debug-control
+```
+
+The included upstream `quest2ros/` package is ROS1/catkin. The new
+`quest2ros2_msgs/` package gives the Isaac script ROS2-native message types with
+the same fields. If your Quest app only publishes into ROS1, bridge the standard
+topics with `ros1_bridge` and bridge `/q2r_right_hand_inputs` with matching custom
+message definitions on both sides, or republish the ROS1 message into the ROS2
+`quest2ros2_msgs/msg/OVR2ROSInputs` type.

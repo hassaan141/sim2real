@@ -1,0 +1,19 @@
+control:
+  keyboard:
+    angle_step: 5
+    pos_step: 0.01
+network:
+  host_ip: 0.0.0.0
+  https_port: 8443
+  websocket_port: 8442
+robot:
+  left_arm:
+    enabled: true
+    name: Left Arm
+    port: /dev/ttyACM0
+  right_arm:
+    enabled: true
+    name: Right Arm
+    port: /dev/ttySO100red
+  send_interval: 0.05
+  vr_to_robot_scale: 1
