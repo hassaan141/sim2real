@@ -8,3 +8,10 @@ datasets/
 *.pt
 recordings/**
 02_Sim2Real/marker_pick_place/logs/**
+
+models
+cosmos
+Nvidia
+
+03_VR_XR
+checkpoint-2000
